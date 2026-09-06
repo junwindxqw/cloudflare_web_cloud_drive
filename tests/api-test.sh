@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 # JunDrive API 集成测试（针对 wrangler dev 本地环境）
-# 管理员密码从 .dev.vars 读取，不硬编码在源码中
+# 登录走邮箱验证码；本地 DEV_MAIL_LOG=1 时验证码随响应返回
 # 注：测试数据用 ASCII 名称，规避 Windows 下 curl.exe 对命令行参数的 ANSI 转码
 set -u
-BASE=http://127.0.0.1:8787
+BASE="${TEST_BASE:-http://127.0.0.1:8787}"
 JAR=$(mktemp)
 JAR2=$(mktemp)
 TMP=$(mktemp -d)
 IP='CF-Connecting-IP: 1.2.3.4'
 PASS=0; FAIL=0
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PW=$(sed -n 's/^ADMIN_PASSWORD=//p' "$ROOT/.dev.vars" | tr -d '\r\n')
 
 chk() {
   if [ "$2" = "$3" ]; then PASS=$((PASS+1)); echo "PASS: $1";
@@ -24,15 +22,25 @@ printf "DELETE FROM files; DELETE FROM shares; DELETE FROM uploads; DELETE FROM 
 npx wrangler d1 execute DB --local --file="$TMP/clean.sql" > /dev/null 2>&1
 echo "已清理本地 D1 测试表"
 
-echo "===== 1. 登录与会话 ====="
+echo "===== 1. 邮箱验证码登录 ====="
 code=$(curl -s -o /dev/null -w '%{http_code}' -H "$IP" "$BASE/api/list")
 chk "未登录访问 list 为 401" 401 "$code"
 
-code=$(curl -s -o /dev/null -w '%{http_code}' -c "$JAR" -H "$IP" -H 'Content-Type: application/json' -d "{\"password\":\"$PW\"}" -X POST "$BASE/api/login")
-chk "正确密码登录 200" 200 "$code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "$IP" -H 'Content-Type: application/json' -d '{"email":"attacker@example.com"}' -X POST "$BASE/api/auth/send-code")
+chk "非白名单邮箱被拒 403" 403 "$code"
+
+SEND=$(curl -s -c "$JAR" -H "$IP" -H 'Content-Type: application/json' -d '{"email":"junwind.xqw@gmail.com"}' -X POST "$BASE/api/auth/send-code")
+CODE=$(echo "$SEND" | jget 'o.devCode')
+chk "send-code 返回开发验证码" "yes" "$(echo "$CODE" | grep -qE '^[0-9]{6}$' && echo yes || echo no)"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "$IP" -H 'Content-Type: application/json' -d '{"email":"junwind.xqw@gmail.com","code":"000000"}' -X POST "$BASE/api/auth/verify")
+chk "错误验证码 401" 401 "$code"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -c "$JAR" -H "$IP" -H 'Content-Type: application/json' -d "{\"email\":\"junwind.xqw@gmail.com\",\"code\":\"$CODE\"}" -X POST "$BASE/api/auth/verify")
+chk "正确验证码登录 200" 200 "$code"
 
 me=$(curl -s -b "$JAR" -H "$IP" "$BASE/api/me")
-chk "me 返回 admin" "admin" "$(echo "$me" | jget 'o.user')"
+chk "me 返回管理员邮箱" "junwind.xqw@gmail.com" "$(echo "$me" | jget 'o.email')"
 
 echo "===== 2. 文件夹 ====="
 F1=$(curl -s -b "$JAR" -H "$IP" -H 'Content-Type: application/json' -d '{"name":"test-dir"}' -X POST "$BASE/api/folder")
@@ -185,11 +193,13 @@ LIST=$(curl -s -b "$JAR" -H "$IP" "$BASE/api/list")
 chk "根目录文件夹全部删除" "0" "$(echo "$LIST" | jget 'o.items.filter(i=>i.type==="folder").length')"
 
 echo "===== 8. 限流与登出 ====="
+# 第 1 节已发送 1 次，此处再发 5 次，第 6 次应触发“每邮箱 5 次/15 分钟”限流
 last=0
-for i in $(seq 1 11); do
-  last=$(curl -s -o /dev/null -w '%{http_code}' -H 'CF-Connecting-IP: 9.9.9.9' -H 'Content-Type: application/json' -d '{"password":"bad"}' -X POST "$BASE/api/login")
+for i in $(seq 1 5); do
+  last=$(curl -s -o /dev/null -w '%{http_code}' -H "$IP" -H 'Content-Type: application/json' -d '{"email":"junwind.xqw@gmail.com"}' -X POST "$BASE/api/auth/send-code")
+  sleep 0.3
 done
-chk "连续失败 11 次触发限流 429" 429 "$last"
+chk "验证码发送超限 429" 429 "$last"
 
 code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -c "$JAR" -H "$IP" -X POST "$BASE/api/logout")
 chk "登出 200" 200 "$code"

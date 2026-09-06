@@ -31,29 +31,49 @@ function errCard(e) {
   return stateCard('error', '无法打开分享', e.message);
 }
 
+// 从链接中提取附带提取码：支持 ?pwd=xxx 与 #pwd=xxx（百度网盘式自动注入）
+function getUrlPwd() {
+  const q = new URLSearchParams(location.search).get('pwd');
+  if (q) return q.trim();
+  const m = location.hash.match(/^#pwd=([A-Za-z0-9_-]+)/);
+  return m ? m[1] : '';
+}
+
 async function boot() {
   if (!token) return shell(stateCard('gone', '分享不存在', '链接不完整'));
   try {
     const meta = await api(`/api/pub/${encodeURIComponent(token)}`);
-    if (meta.needsPassword) return renderPassword();
+    if (meta.needsPassword) {
+      const linkPwd = getUrlPwd();
+      if (linkPwd) {
+        // 自动注入：静默尝试链接中携带的提取码，失败则回退手动输入
+        try {
+          await api(`/api/pub/${encodeURIComponent(token)}/verify`, { method: 'POST', body: { password: linkPwd } });
+          history.replaceState(null, '', location.pathname); // 通过后从地址栏移除提取码
+          return renderContent(await api(`/api/pub/${encodeURIComponent(token)}`));
+        } catch {}
+      }
+      return renderPassword(linkPwd);
+    }
     renderContent(meta);
   } catch (e) {
     shell(errCard(e));
   }
 }
 
-function renderPassword() {
+function renderPassword(prefill = '') {
   shell(`
     <div class="share-card">
       <div class="sc-title">${iconFor({ type: 'file', name: 'lock' }, 26)}<div class="name">此分享已加密</div></div>
       <p class="sc-meta" style="padding-left:0">请输入访问密码查看内容</p>
       <form class="pw-form" id="pw-form">
-        <input class="input" id="pw-input" type="password" placeholder="访问密码" autocomplete="off" />
+        <input class="input" id="pw-input" type="text" placeholder="访问密码" autocomplete="off" value="${escapeHtml(prefill)}" />
         <button class="btn btn-primary" type="submit">查看</button>
       </form>
-      <p class="muted" id="pw-err" style="color:var(--danger);min-height:18px;margin:10px 0 0"></p>
+      <p class="muted" id="pw-err" style="color:var(--danger);min-height:18px;margin:10px 0 0">${prefill ? '链接中的提取码无效，请手动输入' : ''}</p>
     </div>`);
   $('#pw-input').focus();
+  $('#pw-input').select();
   document.getElementById('pw-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const btn = e.target.querySelector('button');

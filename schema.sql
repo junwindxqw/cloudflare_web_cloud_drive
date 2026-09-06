@@ -44,3 +44,20 @@ CREATE TABLE IF NOT EXISTS login_failures (
   ts INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_login_failures_ip ON login_failures(ip, ts);
+
+-- 注册用户（当前仅允许唯一管理员邮箱）
+CREATE TABLE IF NOT EXISTS users (
+  email         TEXT PRIMARY KEY,
+  created_at    INTEGER NOT NULL,              -- 毫秒时间戳
+  last_login_at INTEGER,
+  is_admin      INTEGER NOT NULL DEFAULT 0     -- 1 = 管理员
+);
+
+-- 邮箱登录验证码（同一邮箱仅保留最新一条）
+CREATE TABLE IF NOT EXISTS email_codes (
+  email      TEXT PRIMARY KEY,
+  code_hash  TEXT NOT NULL,                  -- 格式 salt$hex(sha256(salt:code))
+  expires_at INTEGER NOT NULL,               -- 毫秒时间戳
+  attempts   INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);

@@ -37,9 +37,11 @@ function randomToken(bytes = 16) {
 
 export { sha256Hex, randomToken };
 
-// 会话密钥由管理员密码派生：改密码后所有旧会话自动失效
+// 会话签名密钥：优先 SESSION_SECRET，回退旧密钥 ADMIN_PASSWORD（保证已登录会话不失效）
 async function hmacKey(env) {
-  const digest = await sha256(env.ADMIN_PASSWORD || '');
+  const material = env.SESSION_SECRET || env.ADMIN_PASSWORD || '';
+  if (!material) throw new Error('未设置 SESSION_SECRET 密钥');
+  const digest = await sha256(material);
   return crypto.subtle.importKey('raw', digest, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']);
 }
 
@@ -68,8 +70,9 @@ export function timingSafeEqualStr(a, b) {
 
 const SESSION_TTL = 7 * 24 * 3600 * 1000;
 
-export async function createSessionToken(env) {
-  const payload = b64urlEncode(enc.encode(JSON.stringify({ exp: Date.now() + SESSION_TTL })));
+// payload 中带 email，登录后所有接口可识别当前用户
+export async function createSessionToken(env, data = {}) {
+  const payload = b64urlEncode(enc.encode(JSON.stringify({ exp: Date.now() + SESSION_TTL, ...data })));
   return `${payload}.${await hmacSign(env, payload)}`;
 }
 

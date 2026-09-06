@@ -43,26 +43,118 @@ function renderLogin() {
         <div class="login-logo"><svg viewBox="0 0 24 24"><path d="M6 4h5l2 3h5a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"/></svg></div>
         <h1>JunDrive</h1>
         <div class="muted">基于 Cloudflare 的私有云盘</div>
-        <input type="password" class="input" id="login-pw" placeholder="请输入访问密码" autocomplete="current-password" />
+        <div id="login-step1">
+          <input type="email" class="input" id="login-email" placeholder="请输入邮箱地址" autocomplete="email" />
+          <button class="btn btn-primary" style="width:100%;justify-content:center" type="submit" id="login-send">获取验证码</button>
+          <div class="login-hint">首次使用将自动注册，仅限授权邮箱</div>
+        </div>
+        <div id="login-step2" style="display:none">
+          <input type="text" class="input login-code" id="login-code" placeholder="6 位验证码" inputmode="numeric" maxlength="6" autocomplete="one-time-code" />
+          <button class="btn btn-primary" style="width:100%;justify-content:center" type="submit" id="login-verify">登录</button>
+          <div class="login-hint">
+            已发送至 <b id="login-sent-to"></b> · <button type="button" class="link-btn" id="login-resend"></button> · <button type="button" class="link-btn" id="login-back">换邮箱</button>
+          </div>
+        </div>
         <div class="login-err" id="login-err"></div>
-        <button class="btn btn-primary" style="width:100%;justify-content:center" type="submit">登 录</button>
       </form>
-      <div class="login-foot">Powered by Cloudflare Workers · R2 · D1</div>
+      <div class="login-foot">Powered by Cloudflare Workers · R2 · D1 · Resend</div>
     </div>`;
-  $('#login-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const pw = $('#login-pw').value;
-    $('#login-err').textContent = '';
+
+  let email = '';
+  let countdown = 0;
+  let timer = null;
+
+  const errEl = () => document.getElementById('login-err');
+  const renderCountdown = () => {
+    const btn = document.getElementById('login-resend');
+    if (!btn) return;
+    btn.textContent = countdown > 0 ? `${countdown}s 后重发` : '重新发送';
+    btn.disabled = countdown > 0;
+  };
+  const startCountdown = () => {
+    countdown = 60;
+    renderCountdown();
+    clearInterval(timer);
+    timer = setInterval(() => {
+      countdown--;
+      renderCountdown();
+      if (countdown <= 0) clearInterval(timer);
+    }, 1000);
+  };
+
+  const showStep2 = () => {
+    document.getElementById('login-step1').style.display = 'none';
+    document.getElementById('login-step2').style.display = '';
+    document.getElementById('login-sent-to').textContent = email;
+    document.getElementById('login-code').focus();
+    startCountdown();
+  };
+
+  const sendCode = async () => {
+    errEl().textContent = '';
+    const value = document.getElementById('login-email').value.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+      errEl().textContent = '请输入正确的邮箱地址';
+      return false;
+    }
+    email = value;
+    const btn = document.getElementById('login-send');
+    btn.disabled = true;
     try {
-      await api('/api/login', { method: 'POST', body: { password: pw } });
+      await api('/api/auth/send-code', { method: 'POST', body: { email } });
+      showStep2();
+      return true;
+    } catch (err) {
+      errEl().textContent = err.message;
+      return false;
+    } finally {
+      btn.disabled = false;
+    }
+  };
+
+  const verify = async () => {
+    errEl().textContent = '';
+    const code = document.getElementById('login-code').value.trim();
+    if (!/^\d{6}$/.test(code)) {
+      errEl().textContent = '请输入 6 位数字验证码';
+      return;
+    }
+    const btn = document.getElementById('login-verify');
+    btn.disabled = true;
+    try {
+      await api('/api/auth/verify', { method: 'POST', body: { email, code } });
       await refreshMe();
       renderMain();
       loadDir(null, { push: false });
     } catch (err) {
-      $('#login-err').textContent = err.message;
+      errEl().textContent = err.message;
+      btn.disabled = false;
+    }
+  };
+
+  document.getElementById('login-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (document.getElementById('login-step2').style.display === 'none') await sendCode();
+    else await verify();
+  });
+  document.getElementById('login-resend').addEventListener('click', async () => {
+    if (countdown > 0) return;
+    errEl().textContent = '';
+    try {
+      await api('/api/auth/send-code', { method: 'POST', body: { email } });
+      startCountdown();
+    } catch (err) {
+      errEl().textContent = err.message;
     }
   });
-  $('#login-pw').focus();
+  document.getElementById('login-back').addEventListener('click', () => {
+    clearInterval(timer);
+    document.getElementById('login-step2').style.display = 'none';
+    document.getElementById('login-step1').style.display = '';
+    errEl().textContent = '';
+    document.getElementById('login-email').focus();
+  });
+  document.getElementById('login-email').focus();
 }
 
 // ---------------- 主界面骨架 ----------------
@@ -533,13 +625,25 @@ async function deleteItem(it) {
 
 // ---------------- 分享 ----------------
 
+// 提取码字符集：去掉 0/o/1/l 等易混淆字符
+const PWD_CHARS = 'abcdefghjkmnpqrstuvwxyz23456789';
+
+function genSharePwd(len = 4) {
+  const bytes = crypto.getRandomValues(new Uint8Array(len));
+  return [...bytes].map((b) => PWD_CHARS[b % PWD_CHARS.length]).join('');
+}
+
 function openShareDialog(it) {
   const m = openModal(`
     <div class="modal-body">
       <h3>分享「${escapeHtml(it.name)}」</h3>
       <div class="field">
-        <label>访问密码（可选）</label>
-        <input class="input" id="share-pw" type="text" placeholder="留空则无需密码" maxlength="128" />
+        <label class="pw-label">
+          <span class="pw-title"><input type="checkbox" id="share-usepw" checked /> 提取码</span>
+          <button type="button" class="link-btn" id="share-regen">🎲 重新生成</button>
+        </label>
+        <input class="input share-pw" id="share-pw" type="text" value="${genSharePwd()}" maxlength="8" />
+        <div class="muted" style="font-size:12px;margin-top:4px">提取码会自动附加在链接末尾，访客打开链接即可免输入（同百度网盘）</div>
       </div>
       <div class="field">
         <label>有效期</label>
@@ -556,30 +660,55 @@ function openShareDialog(it) {
       <button class="btn" data-close>关闭</button>
       <button class="btn btn-primary" id="share-create">创建链接</button>
     </div>`);
+
+  const pwInput = m.querySelector('#share-pw');
+  const usePw = m.querySelector('#share-usepw');
+  const syncPwState = () => {
+    pwInput.disabled = !usePw.checked;
+    if (usePw.checked && !pwInput.value.trim()) pwInput.value = genSharePwd();
+  };
+  usePw.addEventListener('change', syncPwState);
+  m.querySelector('#share-regen').addEventListener('click', () => {
+    usePw.checked = true;
+    syncPwState();
+    pwInput.value = genSharePwd();
+  });
+
   m.querySelector('#share-create').addEventListener('click', async () => {
     const btn = m.querySelector('#share-create');
     btn.disabled = true;
+    const password = usePw.checked ? (pwInput.value.trim() || genSharePwd()) : null;
     try {
       const res = await api('/api/share', {
         method: 'POST',
-        body: { fileId: it.id, password: m.querySelector('#share-pw').value || null, expireDays: Number(m.querySelector('#share-exp').value) },
+        body: { fileId: it.id, password, expireDays: Number(m.querySelector('#share-exp').value) },
       });
+      const urlWithPwd = password ? `${res.url}?pwd=${encodeURIComponent(password)}` : res.url;
       m.querySelector('#share-result').innerHTML = `
         <div class="share-result">
           <div class="muted" style="margin-bottom:8px;font-size:13px">分享链接已创建：</div>
           <div class="link-row">
-            <span class="link">${escapeHtml(res.url)}</span>
-            <button class="btn" id="share-copy">复制</button>
+            <span class="link">${escapeHtml(urlWithPwd)}</span>
+            <button class="btn" id="share-copy">复制链接</button>
           </div>
+          ${
+            password
+              ? `<div class="share-pwd-row">提取码：<b class="pwd-code">${escapeHtml(password)}</b><button class="btn" id="share-copy-all">复制链接+提取码</button></div>`
+              : ''
+          }
         </div>`;
-      m.querySelector('#share-copy').addEventListener('click', async () => {
+      const copy = async (text, okMsg) => {
         try {
-          await copyText(res.url);
-          toast('链接已复制');
+          await copyText(text);
+          toast(okMsg);
         } catch {
           toast('复制失败，请手动复制', 'err');
         }
-      });
+      };
+      m.querySelector('#share-copy').addEventListener('click', () => copy(urlWithPwd, '链接已复制（含提取码）'));
+      m.querySelector('#share-copy-all')?.addEventListener('click', () =>
+        copy(`链接：${urlWithPwd} 提取码：${password}`, '链接和提取码已复制')
+      );
       toast('分享链接已创建');
     } catch (e) {
       toast(e.message, 'err');
@@ -839,11 +968,21 @@ let activeUploads = 0;
 const MAX_CONCURRENT = 2;
 let uploadSeq = 0;
 
+const MAX_FILE_SIZE = 8 * 1024 * 1024 * 1024; // 与服务端一致：1000 个 8MiB 分片
+
 function handleFiles(fileList) {
   const files = [...fileList];
   if (!files.length) return;
-  if (!files.every((f) => f.size < 8 * 1024 * 1024 * 1000)) toast('单个文件最大 8GB', 'err');
-  for (const f of files) queueUpload(f, state.folderId);
+  let queued = 0;
+  for (const f of files) {
+    if (f.size > MAX_FILE_SIZE) {
+      toast(`「${f.name}」超过单文件 8GB 上限，已跳过`, 'err', 10000);
+      continue;
+    }
+    queueUpload(f, state.folderId);
+    queued++;
+  }
+  if (queued) toast(`开始上传 ${queued} 个文件`);
 }
 
 async function handleFolderPick(fileList) {
@@ -906,6 +1045,54 @@ function pump() {
   }
 }
 
+// 单分片上传：XMLHttpRequest 提供逐字节进度；停滞超时自动中止（由外层重试）
+const PART_STALL_TIMEOUT = 90 * 1000;
+
+function uploadPartOnce(url, blob, { onProgress, shouldAbort }) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', url, true);
+    xhr.responseType = 'json';
+    let stallTimer = null;
+    const settle = (fn, arg) => {
+      clearTimeout(stallTimer);
+      clearInterval(poll);
+      fn(arg);
+    };
+    const armStall = () => {
+      clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => xhr.abort(), PART_STALL_TIMEOUT);
+    };
+    // 轮询取消标记，保证用户点取消时能立刻中断
+    const poll = setInterval(() => {
+      if (shouldAbort()) xhr.abort();
+    }, 300);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded);
+      armStall();
+    };
+    xhr.onload = () =>
+      settle(() => {
+        const data = xhr.response;
+        if (xhr.status >= 200 && xhr.status < 300 && data && data.etag) resolve(data);
+        else reject(new Error((data && data.error) || `分片上传失败 (${xhr.status})`));
+      });
+    xhr.onerror = () => settle(() => reject(new Error('网络错误，分片上传中断')));
+    xhr.onabort = () => settle(() => reject(Object.assign(new Error('已取消'), { aborted: true })));
+    xhr.send(blob);
+    armStall();
+  });
+}
+
+let lastProgressRender = 0;
+function renderProgressThrottled() {
+  const now = Date.now();
+  if (now - lastProgressRender > 200) {
+    lastProgressRender = now;
+    renderUploadPanel();
+  }
+}
+
 async function runUpload(task) {
   try {
     const init = await api('/api/upload/init', {
@@ -920,20 +1107,25 @@ async function runUpload(task) {
     for (let n = 1; n <= total; n++) {
       if (task.aborted) throw Object.assign(new Error('已取消'), { aborted: true });
       const start = (n - 1) * partSize;
+      const partBase = start;
       const chunk = task.file.slice(start, Math.min(start + partSize, task.file.size));
       let etag = null;
-      for (let attempt = 1; attempt <= 2; attempt++) {
+      // 停滞自动中止后最多重试 3 次
+      for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          const res = await fetch(apiUrl(`/api/upload/${init.uploadId}/part/${n}`), { method: 'PUT', body: chunk });
-          if (!res.ok) {
-            const data = await res.json().catch(() => ({}));
-            throw new Error(data.error || `分片上传失败 (${res.status})`);
-          }
-          etag = (await res.json()).etag;
+          const data = await uploadPartOnce(apiUrl(`/api/upload/${init.uploadId}/part/${n}`), chunk, {
+            onProgress: (loaded) => {
+              task.sent = Math.min(partBase + loaded, task.file.size);
+              renderProgressThrottled();
+            },
+            shouldAbort: () => task.aborted,
+          });
+          etag = data.etag;
           break;
         } catch (e) {
-          if (attempt === 2) throw e;
-          await new Promise((r) => setTimeout(r, 1200));
+          if (e.aborted && task.aborted) throw e;
+          if (attempt === 3) throw e;
+          await new Promise((r) => setTimeout(r, 1500 * attempt));
         }
       }
       parts.push({ partNumber: n, etag });
@@ -945,6 +1137,9 @@ async function runUpload(task) {
     await api(`/api/upload/${init.uploadId}/complete`, { method: 'POST', body: { parts } });
     task.status = '完成';
     task.sent = task.total;
+    task.doneAt = Date.now();
+    toast(`「${task.file.name}」上传完成`, 'ok', 10000);
+    scheduleFinishedCleanup();
     refreshMe().then(updateUsageText).catch(() => {});
     if (!state.searchMode) loadDir(state.folderId, { push: false, silent: true });
   } catch (e) {
@@ -958,6 +1153,28 @@ async function runUpload(task) {
     }
   }
   renderUploadPanel();
+}
+
+// 完成的任务 10 秒后自动从面板消失；全部结束且无失败时收起面板
+const FINISHED_TTL = 10 * 1000;
+let finishedCleanupTimer = null;
+
+function scheduleFinishedCleanup() {
+  clearTimeout(finishedCleanupTimer);
+  finishedCleanupTimer = setTimeout(() => {
+    const now = Date.now();
+    for (let i = uploadTasks.length - 1; i >= 0; i--) {
+      const t = uploadTasks[i];
+      if (t.status === '完成' && t.doneAt && now - t.doneAt >= FINISHED_TTL) uploadTasks.splice(i, 1);
+    }
+    const stillBusy = uploadTasks.some((t) => ['等待中', '上传中', '合并中'].includes(t.status));
+    const hasFailed = uploadTasks.some((t) => t.status === '失败');
+    if (!stillBusy && !hasFailed) {
+      uploadTasks.length = 0;
+      document.getElementById('upload-panel')?.classList.remove('open');
+    }
+    renderUploadPanel();
+  }, FINISHED_TTL + 200);
 }
 
 function renderUploadPanel() {
@@ -1013,6 +1230,31 @@ function clearFinishedUploads() {
   renderUploadPanel();
 }
 
+// ---------------- 粘贴上传（Ctrl+V / 截图粘贴） ----------------
+
+function setupPasteUpload() {
+  window.addEventListener('paste', (e) => {
+    // 仅在主界面（已登录）生效；分享页无 file-input
+    if (!document.getElementById('file-input')) return;
+    const dt = e.clipboardData;
+    if (!dt) return;
+    const files = [...dt.files];
+    // 部分浏览器（如截图场景）需要从 items 中逐个提取
+    if (!files.length && dt.items && dt.items.length) {
+      for (const item of dt.items) {
+        if (item.kind === 'file') {
+          const f = item.getAsFile();
+          if (f) files.push(f);
+        }
+      }
+    }
+    if (!files.length) return;
+    e.preventDefault();
+    if (state.searchMode) toast('粘贴上传会放入当前浏览的目录，请先退出搜索', 'err');
+    else handleFiles(files);
+  });
+}
+
 // ---------------- 拖拽上传（PC） ----------------
 
 function setupDragDrop() {
@@ -1043,4 +1285,5 @@ function setupDragDrop() {
   });
 }
 
+setupPasteUpload();
 boot();

@@ -126,7 +126,7 @@ export function iconFor(item, size = 22) {
 // ---------- toast ----------
 
 let toastTimer = null;
-export function toast(msg, type = 'info') {
+export function toast(msg, type = 'info', duration = 2600) {
   let el = document.querySelector('.toast');
   if (!el) {
     el = document.createElement('div');
@@ -136,7 +136,7 @@ export function toast(msg, type = 'info') {
   el.textContent = msg;
   el.className = `toast show ${type}`;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
+  toastTimer = setTimeout(() => el.classList.remove('show'), Math.max(1000, duration));
 }
 
 // ---------- 弹窗 ----------

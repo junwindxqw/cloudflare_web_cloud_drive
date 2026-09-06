@@ -8,14 +8,15 @@
 | 文件存储 | Cloudflare **R2** | 10 GB 存储/月，流量免费 |
 | 元数据（文件树/分享/上传任务） | Cloudflare **D1** (SQLite) | 5 GB 存储，500 万行读/天 |
 | 前端托管 | Workers **静态资源** | 免费、不限请求 |
+| 登录验证码邮件 | **Resend** | 100 封/天，域名 `junwind.site` |
 
 ## 功能
 
-- 🔐 密码登录（单管理员，HMAC 签名会话 Cookie，失败限流）
-- 📤 上传：单文件 / 整个文件夹（保留目录结构）/ 桌面拖拽；R2 分片上传，单文件最大 8 GB，失败自动重试、可取消
+- 🔐 邮箱验证码登录（Resend 发信，仅授权邮箱可注册，首次登录自动注册为唯一管理员；HMAC 签名会话 Cookie）
+- 📤 上传：单文件 / 整个文件夹（保留目录结构）/ 桌面拖拽 / **Ctrl+V 直接粘贴文件或截图**；R2 分片上传，单文件最大 8 GB，实时进度、停滞自动重试、可取消；上传完成提示 10 秒后自动消失
 - 📥 下载：支持断点续传（HTTP Range），视频/音频可拖动进度条
 - 📁 文件夹：新建、重命名、移动、递归删除；同名自动加 `(1)` 后缀
-- 🔗 分享：公开链接，可选访问密码与有效期（1/7/30 天/永久），支持文件与整个文件夹；分享管理页可复制/撤销
+- 🔗 分享：公开链接，提取码自动生成并直接附带在链接上（`?pwd=xxxx`，访客打开即自动验证，免输入，同百度网盘）；可选有效期（1/7/30 天/永久），支持文件与整个文件夹；分享管理页可复制/撤销
 - 👁 预览：图片、视频、音频、PDF、常见文本/代码（上传的 HTML/SVG 一律强制下载，杜绝存储型 XSS）
 - 📱 UI：PC 与手机自适应（手机端底部 FAB 操作），自动深色模式，中文界面
 - 🔍 全局搜索、列表/网格视图、按名称/大小/时间排序
@@ -36,12 +37,21 @@ npx wrangler d1 create jun-drive-db
 # 2. 初始化数据库表
 npx wrangler d1 execute jun-drive-db --remote --file=schema.sql
 
-# 3. 设置登录密码（会提示输入，勿提交到代码库）
-npx wrangler secret put ADMIN_PASSWORD
+# 3. 设置密钥（均会提示输入，勿提交到代码库）
+npx wrangler secret put SESSION_SECRET      # 会话签名密钥（任意长随机串）
+npx wrangler secret put RESEND_API_KEY      # Resend API 密钥
 
 # 4. 部署（含前端静态资源）
 npx wrangler deploy
 ```
+
+### 邮件登录配置（Resend）
+
+1. 在 [Resend](https://resend.com) 注册并把域名 `junwind.site`（或其他域名）添加为已验证域名，按提示在 Cloudflare DNS 中加好 SPF/DKIM 记录；
+2. 创建 API Key 并 `npx wrangler secret put RESEND_API_KEY`；
+3. 可选变量（在 `wrangler.jsonc` 的 `vars` 中配置）：
+   - `MAIL_FROM`：发件人，默认 `JunDrive <noreply@junwind.site>`，需为已验证域名下的邮箱；
+   - `ALLOWED_EMAIL`：允许注册/登录的邮箱，默认 `junwind.xqw@gmail.com`（唯一管理员）。
 
 ### 绑定自定义域名
 
@@ -57,9 +67,11 @@ npx wrangler deploy
 
 ```bash
 npm run db:init:local        # 初始化本地 D1（首次）
-npm run dev                  # http://127.0.0.1:8787 ，本地密码见 .dev.vars
-npm test                     # API 集成测试（49 项，需 dev 服务运行中）
+npm run dev                  # http://127.0.0.1:8787 ，本地变量见 .dev.vars
+npm test                     # API 集成测试（需 dev 服务运行中）
 ```
+
+本地开发默认 `DEV_MAIL_LOG=1`：不真正发邮件，验证码直接在 `/api/auth/send-code` 响应的 `devCode` 字段返回（也会打印到 dev 控制台）。生产环境切勿设置该变量。
 
 ## 目录结构
 
@@ -69,7 +81,8 @@ npm test                     # API 集成测试（49 项，需 dev 服务运行�
 ├── src/
 │   ├── worker.js       # Worker 入口
 │   ├── api.js          # 全部 API 路由
-│   └── auth.js         # 会话/口令/限流
+│   ├── auth.js         # 会话/口令/限流
+│   └── mail.js         # Resend 邮件发送（含出站 URL 校验）
 ├── public/             # 前端 SPA（无构建，直接托管）
 │   ├── index.html
 │   ├── app.js          # 网盘主应用
@@ -81,9 +94,11 @@ npm test                     # API 集成测试（49 项，需 dev 服务运行�
 
 ## 安全设计
 
-- 会话为 HMAC-SHA256 签名的无状态 Cookie（HttpOnly / Secure / SameSite=Lax），密钥由 `ADMIN_PASSWORD` 派生，改密码即全端下线
-- 登录与分享口令验证均按 IP 限流（15 分钟 10 次）
+- 登录为邮箱验证码制：仅白名单邮箱可获取验证码（默认 `junwind.xqw@gmail.com`，即唯一管理员），验证码 10 分钟有效、至多 5 次尝试、发送与校验均有限流
+- 会话为 HMAC-SHA256 签名的无状态 Cookie（HttpOnly / Secure / SameSite=Lax），密钥由 `SESSION_SECRET`（或回退 `ADMIN_PASSWORD`）派生，换密钥即全端下线
+- 登录与分享口令验证均按 IP/账号限流（15 分钟计数）
 - 分享访问范围用递归 CTE 严格限制在分享根的子树内，目录穿越/越权访问返回 403
+- 出站邮件请求固定为 `https://api.resend.com`，发起前校验协议与 host（拒绝 localhost/私有/保留地址）
 - 上传的 HTML/SVG 等可执行类型不提供内联预览；所有文件响应带 `X-Content-Type-Options: nosniff` 与 `Content-Security-Policy: sandbox`
 - 文件名规范化（拒绝路径分隔符/控制字符），R2 对象 key 为 UUID，与用户输入完全隔离
 

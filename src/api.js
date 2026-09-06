@@ -1,6 +1,7 @@
-// 网盘 API：登录、目录、上传（R2 分片）、下载（Range）、分享
+// 网盘 API：邮箱验证码登录、目录、上传（R2 分片）、下载（Range）、分享
 
 import * as auth from './auth.js';
+import { sendLoginCodeMail } from './mail.js';
 
 export class HttpError extends Error {
   constructor(status, message) {
@@ -222,8 +223,11 @@ async function uploadPart(request, env, uploadId, nStr) {
   if (!row) throw new HttpError(404, '上传任务不存在或已失效');
   if (!row.r2_upload_id) throw new HttpError(400, '该上传无需分片');
   if (!request.body) throw new HttpError(400, '分片内容为空');
+  // 先整体读入内存（单分片 ≤ 8MiB）再交给 R2：直接把 request.body 流式管道给 R2 在部分运行时环境下会停滞悬挂
+  const buffer = await request.arrayBuffer();
+  if (buffer.byteLength === 0) throw new HttpError(400, '分片内容为空');
   const mp = env.BUCKET.resumeMultipartUpload(row.r2_key, row.r2_upload_id);
-  const part = await mp.uploadPart(n, request.body);
+  const part = await mp.uploadPart(n, buffer);
   return json({ etag: part.etag });
 }
 
@@ -359,24 +363,95 @@ async function listShares(env) {
 
 // ---------- 会话接口 ----------
 
-async function login(request, env, ctx) {
-  if (!env.ADMIN_PASSWORD) throw new HttpError(500, '服务端未设置 ADMIN_PASSWORD 密钥');
-  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
-  if (!(await auth.checkRateLimit(env, ip))) throw new HttpError(429, '尝试次数过多，请 15 分钟后再试');
-  const body = await readJson(request);
-  const password = typeof body.password === 'string' ? body.password : '';
-  const ok = auth.timingSafeEqualStr(await auth.sha256Hex(password), await auth.sha256Hex(env.ADMIN_PASSWORD));
-  if (!ok) {
-    ctx.waitUntil(auth.recordFailure(env, ip));
-    throw new HttpError(401, '密码错误');
-  }
-  ctx.waitUntil(auth.clearFailures(env, ip));
-  return json({ ok: true }, 200, { 'Set-Cookie': auth.sessionCookie(await auth.createSessionToken(env)) });
+// ---------- 邮箱验证码登录 ----------
+
+const CODE_TTL = 10 * 60 * 1000; // 验证码 10 分钟有效
+const CODE_MAX_ATTEMPTS = 5;
+// 唯一管理员邮箱：仅该邮箱可注册/登录（可用 ALLOWED_EMAIL 变量覆盖）
+const ADMIN_EMAIL = 'junwind.xqw@gmail.com';
+
+function normalizeEmail(s) {
+  return typeof s === 'string' ? s.trim().toLowerCase() : '';
 }
 
-async function me(env) {
+function allowedEmail(env) {
+  return (env.ALLOWED_EMAIL || ADMIN_EMAIL).trim().toLowerCase();
+}
+
+async function sendLoginCode(request, env, ctx) {
+  const body = await readJson(request);
+  const email = normalizeEmail(body.email);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, '邮箱格式不正确');
+  if (email !== allowedEmail(env)) throw new HttpError(403, '该邮箱未获准注册本站');
+
+  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+  if (!(await auth.checkRateLimit(env, `send:${email}`, 15 * 60 * 1000, 5))) {
+    throw new HttpError(429, '验证码发送过于频繁，请 15 分钟后再试');
+  }
+  if (!(await auth.checkRateLimit(env, `sendip:${ip}`, 15 * 60 * 1000, 20))) {
+    throw new HttpError(429, '请求过于频繁，请 15 分钟后再试');
+  }
+
+  const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1000000).padStart(6, '0');
+  const codeHash = await auth.hashSharePassword(code);
+  const now = Date.now();
+  // 同一邮箱同时只保留一条有效验证码，重发即覆盖
+  await env.DB.prepare(
+    `INSERT INTO email_codes (email, code_hash, expires_at, attempts, created_at) VALUES (?,?,?,0,?)
+     ON CONFLICT(email) DO UPDATE SET code_hash = excluded.code_hash, expires_at = excluded.expires_at, attempts = 0, created_at = excluded.created_at`
+  )
+    .bind(email, codeHash, now + CODE_TTL, now)
+    .run();
+  ctx.waitUntil(auth.recordFailure(env, `send:${email}`));
+
+  let extra = {};
+  try {
+    extra = await sendLoginCodeMail(env, email, code);
+  } catch (e) {
+    if (e && e.status) throw e;
+    console.error('验证码邮件发送异常:', e && (e.stack || e.message || e));
+    throw new HttpError(502, '验证码邮件发送失败，请稍后再试');
+  }
+  return json({ ok: true, ...(extra.devCode ? { devCode: extra.devCode } : {}) });
+}
+
+async function verifyLoginCode(request, env) {
+  const body = await readJson(request);
+  const email = normalizeEmail(body.email);
+  const code = typeof body.code === 'string' ? body.code.trim() : '';
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, '邮箱格式不正确');
+  if (!/^\d{6}$/.test(code)) throw new HttpError(400, '请输入 6 位数字验证码');
+
+  const row = await env.DB.prepare('SELECT * FROM email_codes WHERE email = ?').bind(email).first();
+  if (!row) throw new HttpError(400, '请先获取验证码');
+  if (row.expires_at < Date.now()) {
+    await env.DB.prepare('DELETE FROM email_codes WHERE email = ?').bind(email).run();
+    throw new HttpError(400, '验证码已过期，请重新获取');
+  }
+  if (row.attempts >= CODE_MAX_ATTEMPTS) {
+    await env.DB.prepare('DELETE FROM email_codes WHERE email = ?').bind(email).run();
+    throw new HttpError(429, '错误次数过多，请重新获取验证码');
+  }
+  if (!(await auth.verifySharePassword(row.code_hash, code))) {
+    await env.DB.prepare('UPDATE email_codes SET attempts = attempts + 1 WHERE email = ?').bind(email).run();
+    throw new HttpError(401, '验证码错误');
+  }
+
+  const now = Date.now();
+  const existed = await env.DB.prepare('SELECT email FROM users WHERE email = ?').bind(email).first();
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM email_codes WHERE email = ?').bind(email),
+    existed
+      ? env.DB.prepare('UPDATE users SET last_login_at = ? WHERE email = ?').bind(now, email)
+      : env.DB.prepare('INSERT INTO users (email, created_at, last_login_at, is_admin) VALUES (?,?,?,1)').bind(email, now, now),
+  ]);
+  const token = await auth.createSessionToken(env, { email });
+  return json({ ok: true, registered: !existed }, 200, { 'Set-Cookie': auth.sessionCookie(token) });
+}
+
+async function me(env, session) {
   const row = await env.DB.prepare("SELECT COUNT(*) AS c, COALESCE(SUM(size),0) AS s FROM files WHERE type = 'file'").first();
-  return json({ user: 'admin', fileCount: row?.c || 0, usage: row?.s || 0 });
+  return json({ email: session?.email || null, isAdmin: true, fileCount: row?.c || 0, usage: row?.s || 0 });
 }
 
 async function listDir(request, env, url) {
@@ -479,7 +554,11 @@ export async function handleApi(request, env, ctx) {
   try {
     if (seg[1] === 'pub') return await handlePub(request, env, ctx, url, seg, method);
 
-    if (seg[1] === 'login' && method === 'POST' && seg.length === 2) return await login(request, env, ctx);
+    // 邮箱验证码登录（无需会话）
+    if (seg[1] === 'auth' && seg.length === 3) {
+      if (seg[2] === 'send-code' && method === 'POST') return await sendLoginCode(request, env, ctx);
+      if (seg[2] === 'verify' && method === 'POST') return await verifyLoginCode(request, env);
+    }
 
     const session = await auth.verifySession(request, env);
     if (!session) return json({ error: '未登录或会话已过期' }, 401);
@@ -487,7 +566,7 @@ export async function handleApi(request, env, ctx) {
     if (seg[1] === 'logout' && method === 'POST' && seg.length === 2) {
       return json({ ok: true }, 200, { 'Set-Cookie': auth.clearSessionCookie() });
     }
-    if (seg[1] === 'me' && method === 'GET' && seg.length === 2) return await me(env);
+    if (seg[1] === 'me' && method === 'GET' && seg.length === 2) return await me(env, session);
 
     if (seg[1] === 'list' && method === 'GET' && seg.length === 2) return await listDir(request, env, url);
     if (seg[1] === 'search' && method === 'GET' && seg.length === 2) return await searchFiles(env, url);
