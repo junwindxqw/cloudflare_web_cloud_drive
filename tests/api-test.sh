@@ -19,8 +19,8 @@ chk() {
 jget() { node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const o=JSON.parse(d);const v=$1;console.log(typeof v==='object'&&v!==null?JSON.stringify(v):v)}catch(e){console.log('PARSE_ERR')}})"; }
 
 echo "===== 0. 清理本地测试数据 ====="
-printf "DELETE FROM files; DELETE FROM shares; DELETE FROM uploads; DELETE FROM login_failures;\n" > "$TMP/clean.sql"
-npx wrangler d1 execute DB --local --file="$TMP/clean.sql" > /dev/null 2>&1
+printf "DELETE FROM files; DELETE FROM shares; DELETE FROM uploads; DELETE FROM login_failures; DELETE FROM email_codes; DELETE FROM users;\n" > "$TMP/clean.sql"
+npx wrangler d1 execute DB --local --file="$TMP/clean.sql" > /dev/null 2>&1 || { echo "警告: 清理命令执行失败"; npx wrangler d1 execute DB --local --file="$TMP/clean.sql"; }
 echo "已清理本地 D1 测试表"
 
 echo "===== 1. 邮箱验证码登录 ====="

@@ -1488,4 +1488,8 @@ function setupDragDrop() {
 }
 
 setupPasteUpload();
+// 未登录时直接访问 #/login、#/register、#/forgot 也能切换到对应视图
+window.addEventListener('hashchange', () => {
+  if (AUTH_HASH[location.hash] && !document.querySelector('.topbar')) renderAuth(AUTH_HASH[location.hash]);
+});
 boot();
