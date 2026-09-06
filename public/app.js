@@ -32,6 +32,11 @@ async function boot() {
 }
 
 window.addEventListener('jd:unauthorized', () => {
+  // 已在认证页（未登录）时不重渲染，避免覆盖用户当前所在的登录/注册/找回视图
+  if (document.getElementById('auth-view')) {
+    if (booted) toast('登录已过期，请重新登录', 'err');
+    return;
+  }
   renderAuth('login');
   if (booted) toast('登录已过期，请重新登录', 'err');
 });
