@@ -210,6 +210,144 @@ a {
   font-size: 18px;
   font-family: Consolas, monospace;
 }
+
+/* ---------- 认证页（登录 / 注册 / 找回密码） ---------- */
+.auth-card {
+  position: relative;
+  overflow: hidden;
+  text-align: left;
+  padding-top: 30px;
+}
+.auth-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, var(--primary), #7c3aed, #ec4899);
+}
+.auth-card .login-logo {
+  margin-bottom: 10px;
+}
+.auth-card h1 {
+  text-align: center;
+}
+.auth-card > .muted {
+  text-align: center;
+  margin-bottom: 18px;
+}
+.auth-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 18px;
+}
+.auth-tabs button {
+  flex: 1;
+  border: none;
+  background: none;
+  padding: 10px 0 11px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 0.15s, border-color 0.15s;
+}
+.auth-tabs button:hover {
+  color: var(--fg);
+}
+.auth-tabs button.active {
+  color: var(--primary);
+  font-weight: 600;
+  border-bottom-color: var(--primary);
+}
+#auth-view form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.code-row {
+  display: flex;
+  gap: 8px;
+}
+.code-row .input {
+  flex: 1;
+}
+.code-row .btn {
+  flex: none;
+  min-width: 108px;
+  justify-content: center;
+}
+.pw-input-wrap {
+  position: relative;
+}
+.pw-input-wrap .input {
+  padding-right: 40px;
+}
+.pw-eye {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 6px;
+  display: flex;
+}
+.pw-eye:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
+.auth-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: -4px;
+}
+.auth-err {
+  color: var(--danger);
+  font-size: 13px;
+  min-height: 18px;
+  margin: -4px 0 0;
+}
+.auth-submit {
+  width: 100%;
+  justify-content: center;
+  padding: 10px 14px;
+  font-size: 15px;
+}
+.auth-foot {
+  text-align: center;
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 16px;
+}
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  margin: 14px 0 10px;
+}
+.auth-divider::before,
+.auth-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.login-code {
+  text-align: center;
+  letter-spacing: 10px;
+  font-size: 18px;
+  font-family: Consolas, monospace;
+}
 .link-btn {
   border: none;
   background: none;

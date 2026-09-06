@@ -12,7 +12,8 @@
 
 ## 功能
 
-- 🔐 邮箱验证码登录（Resend 发信，仅授权邮箱可注册，首次登录自动注册为唯一管理员；HMAC 签名会话 Cookie）
+- 🔐 完整账号体系：**注册 / 登录 / 找回密码** 三个页面（标签页切换），密码使用 PBKDF2 加盐哈希存储，支持邮箱验证码登录、忘记密码自助重置、站内修改密码（改密后其他设备全部下线）；Resend 发信
+- 👤 唯一管理员：默认仅授权邮箱可注册/登录（首次登录自动注册）；设置 `OPEN_REGISTRATION=1` 后对所有人开放注册（注意：当前网盘为单用户共享模型，开放前请先评估）
 - 📤 上传：单文件 / 整个文件夹（保留目录结构）/ 桌面拖拽 / **Ctrl+V 直接粘贴文件或截图**；R2 分片上传，单文件最大 8 GB，实时进度、停滞自动重试、可取消；上传完成提示 10 秒后自动消失
 - 📥 下载：支持断点续传（HTTP Range），视频/音频可拖动进度条
 - 📁 文件夹：新建、重命名、移动、递归删除；同名自动加 `(1)` 后缀
@@ -51,7 +52,8 @@ npx wrangler deploy
 2. 创建 API Key 并 `npx wrangler secret put RESEND_API_KEY`；
 3. 可选变量（在 `wrangler.jsonc` 的 `vars` 中配置）：
    - `MAIL_FROM`：发件人，默认 `JunDrive <noreply@junwind.site>`，需为已验证域名下的邮箱；
-   - `ALLOWED_EMAIL`：允许注册/登录的邮箱，默认 `junwind.xqw@gmail.com`（唯一管理员）。
+   - `ALLOWED_EMAIL`：允许注册/登录的邮箱，默认 `junwind.xqw@gmail.com`（唯一管理员）；
+   - `OPEN_REGISTRATION`：设为 `1` 时对所有人开放邮箱注册/登录（默认关闭；当前网盘为单用户共享模型，开放前请先评估）。
 
 ### 绑定自定义域名
 
@@ -94,9 +96,11 @@ npm test                     # API 集成测试（需 dev 服务运行中）
 
 ## 安全设计
 
-- 登录为邮箱验证码制：仅白名单邮箱可获取验证码（默认 `junwind.xqw@gmail.com`，即唯一管理员），验证码 10 分钟有效、至多 5 次尝试、发送与校验均有限流
-- 会话为 HMAC-SHA256 签名的无状态 Cookie（HttpOnly / Secure / SameSite=Lax），密钥由 `SESSION_SECRET`（或回退 `ADMIN_PASSWORD`）派生，换密钥即全端下线
-- 登录与分享口令验证均按 IP/账号限流（15 分钟计数）
+- 完整账号体系：注册（邮箱验证码验证归属 + 设置密码）、密码登录、忘记密码（验证码 + 新密码）、站内修改密码；密码以 PBKDF2-SHA256（25k 次迭代 + 随机盐）哈希存储
+- 会话为 HMAC-SHA256 签名的无状态 Cookie（HttpOnly / Secure / SameSite=Lax），密钥由 `SESSION_SECRET`（或回退 `ADMIN_PASSWORD`）派生；会话绑定用户 epoch，重置/修改密码后其他设备全部下线
+- 默认仅白名单邮箱可注册/登录（`ALLOWED_EMAIL`，默认 `junwind.xqw@gmail.com` 唯一管理员）；`OPEN_REGISTRATION=1` 时开放
+- 验证码按用途（登录/注册/重置）隔离，10 分钟有效、至多 5 次尝试；发码 5 次/15 分钟/邮箱、20 次/15 分钟/IP；密码登录错误 10 次/15 分钟/邮箱
+- 登录失败提示统一为“邮箱或密码错误”，不泄露账号是否存在；找回密码对未注册邮箱静默忽略
 - 分享访问范围用递归 CTE 严格限制在分享根的子树内，目录穿越/越权访问返回 403
 - 出站邮件请求固定为 `https://api.resend.com`，发起前校验协议与 host（拒绝 localhost/私有/保留地址）
 - 上传的 HTML/SVG 等可执行类型不提供内联预览；所有文件响应带 `X-Content-Type-Options: nosniff` 与 `Content-Security-Policy: sandbox`

@@ -45,10 +45,17 @@ function assertSafeHttpUrl(rawUrl) {
   return url;
 }
 
-export async function sendLoginCodeMail(env, email, code) {
+const PURPOSE_LABELS = {
+  login: '登录',
+  register: '注册账号',
+  reset: '重置密码',
+};
+
+export async function sendCodeMail(env, email, code, purpose = 'login') {
+  const label = PURPOSE_LABELS[purpose] || '验证';
   // 本地开发：设置 DEV_MAIL_LOG 后不真正发信，验证码直接随响应返回（仅限开发环境配置）
   if (env.DEV_MAIL_LOG) {
-    console.log(`[DEV_MAIL_LOG] 登录验证码 ${email}: ${code}`);
+    console.log(`[DEV_MAIL_LOG] ${label}验证码 ${email}: ${code}`);
     return { devCode: code };
   }
   if (!env.RESEND_API_KEY) throw new HttpError(500, '服务端未配置 RESEND_API_KEY 密钥，无法发送验证码邮件');
@@ -57,13 +64,13 @@ export async function sendLoginCodeMail(env, email, code) {
   const body = {
     from,
     to: [email],
-    subject: `JunDrive 登录验证码 ${code}`,
-    text: `你的 JunDrive 登录验证码是 ${code}，10 分钟内有效。若非本人操作，请忽略本邮件。`,
+    subject: `JunDrive ${label}验证码 ${code}`,
+    text: `你正在进行「${label}」操作，验证码是 ${code}，10 分钟内有效。若非本人操作，请忽略本邮件。`,
     html: `<!doctype html><html><body style="margin:0;padding:24px;background:#f1f5f9;font-family:'Segoe UI',Arial,'PingFang SC','Microsoft YaHei',sans-serif;">
   <div style="max-width:460px;margin:0 auto;background:#ffffff;border-radius:12px;padding:32px;box-shadow:0 1px 3px rgba(0,0,0,.08);">
     <div style="font-size:20px;font-weight:700;color:#2563eb;margin-bottom:16px;">JunDrive 云盘</div>
     <p style="margin:0 0 8px;color:#0f172a;font-size:15px;">你好，</p>
-    <p style="margin:0 0 20px;color:#475569;font-size:14px;">本次登录的验证码如下，<b>10 分钟内有效</b>。请勿泄露给他人：</p>
+    <p style="margin:0 0 20px;color:#475569;font-size:14px;">你正在进行<b>「${label}」</b>操作，验证码如下，<b>10 分钟内有效</b>。请勿泄露给他人：</p>
     <div style="text-align:center;background:#eff6ff;border:1px dashed #93c5fd;border-radius:10px;padding:16px;margin-bottom:20px;">
       <span style="font-size:32px;font-weight:700;letter-spacing:10px;color:#1d4ed8;font-family:Consolas,monospace;">${code}</span>
     </div>

@@ -6,6 +6,7 @@ set -u
 BASE="${TEST_BASE:-http://127.0.0.1:8787}"
 JAR=$(mktemp)
 JAR2=$(mktemp)
+JAR3=$(mktemp)
 TMP=$(mktemp -d)
 IP='CF-Connecting-IP: 1.2.3.4'
 PASS=0; FAIL=0
@@ -41,6 +42,69 @@ chk "正确验证码登录 200" 200 "$code"
 
 me=$(curl -s -b "$JAR" -H "$IP" "$BASE/api/me")
 chk "me 返回管理员邮箱" "junwind.xqw@gmail.com" "$(echo "$me" | jget 'o.email')"
+chk "验证码登录后未设密码" "false" "$(echo "$me" | jget 'o.hasPassword')"
+
+echo "===== 1b. 注册 / 密码登录 / 找回密码 ====="
+# 测试用密码每次随机生成（T + 随机 hex + a1，保证含字母和数字且 ≥ 8 位）
+RND=$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')
+PW1="T${RND}a1"; PW2="T${RND}b2"; PW3="T${RND}c3"
+
+SEND=$(curl -s -H "$IP" -H 'Content-Type: application/json' -d '{"email":"junwind.xqw@gmail.com","purpose":"register"}' -X POST "$BASE/api/auth/send-code")
+REGCODE=$(echo "$SEND" | jget 'o.devCode')
+chk "注册验证码返回" "yes" "$(echo "$REGCODE" | grep -qE '^[0-9]{6}$' && echo yes || echo no)"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "$IP" -H 'Content-Type: application/json' -d '{"email":"junwind.xqw@gmail.com","code":"000000","password":"'"$PW1"'"}' -X POST "$BASE/api/auth/register")
+chk "错误验证码注册 401" 401 "$code"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "$IP" -H 'Content-Type: application/json' -d "{\"email\":\"junwind.xqw@gmail.com\",\"code\":\"$REGCODE\",\"password\":\"short1\"}" -X POST "$BASE/api/auth/register")
+chk "弱密码注册 400" 400 "$code"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "$IP" -H 'Content-Type: application/json' -d "{\"email\":\"junwind.xqw@gmail.com\",\"code\":\"$REGCODE\",\"password\":\"$PW1\"}" -X POST "$BASE/api/auth/register")
+chk "注册成功 200" 200 "$code"
+
+me=$(curl -s -b "$JAR" -H "$IP" "$BASE/api/me")
+chk "注册后 hasPassword" "true" "$(echo "$me" | jget 'o.hasPassword')"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "$IP" -H 'Content-Type: application/json' -d '{"email":"junwind.xqw@gmail.com","password":"'"$PW2"'"}' -X POST "$BASE/api/auth/login")
+chk "错误密码登录 401" 401 "$code"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -c "$JAR3" -H "$IP" -H 'Content-Type: application/json' -d "{\"email\":\"junwind.xqw@gmail.com\",\"password\":\"$PW1\"}" -X POST "$BASE/api/auth/login")
+chk "正确密码登录 200" 200 "$code"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR3" -H "$IP" "$BASE/api/list")
+chk "密码登录会话可用 200" 200 "$code"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR3" -H "$IP" -H 'Content-Type: application/json' -d '{"oldPassword":"'"$PW2"'","newPassword":"'"$PW3"'"}' -X POST "$BASE/api/auth/change-password")
+chk "修改密码旧密码错误 401" 401 "$code"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -c "$JAR3" -b "$JAR3" -H "$IP" -H 'Content-Type: application/json' -d '{"oldPassword":"'"$PW1"'","newPassword":"'"$PW2"'"}' -X POST "$BASE/api/auth/change-password")
+chk "修改密码成功 200" 200 "$code"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR3" -H "$IP" "$BASE/api/list")
+chk "改密后当前会话仍有效 200" 200 "$code"
+
+SEND=$(curl -s -H "$IP" -H 'Content-Type: application/json' -d '{"email":"junwind.xqw@gmail.com","purpose":"reset"}' -X POST "$BASE/api/auth/send-code")
+RESETCODE=$(echo "$SEND" | jget 'o.devCode')
+chk "重置验证码返回" "yes" "$(echo "$RESETCODE" | grep -qE '^[0-9]{6}$' && echo yes || echo no)"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "$IP" -H 'Content-Type: application/json' -d '{"email":"junwind.xqw@gmail.com","code":"000000","password":"'"$PW3"'"}' -X POST "$BASE/api/auth/reset-password")
+chk "错误验证码重置 401" 401 "$code"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "$IP" -H 'Content-Type: application/json' -d "{\"email\":\"junwind.xqw@gmail.com\",\"code\":\"$RESETCODE\",\"password\":\"$PW3\"}" -X POST "$BASE/api/auth/reset-password")
+chk "重置密码成功 200" 200 "$code"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "$IP" -H 'Content-Type: application/json' -d '{"email":"junwind.xqw@gmail.com","password":"'"$PW2"'"}' -X POST "$BASE/api/auth/login")
+chk "重置后旧密码登录 401" 401 "$code"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -c "$JAR3" -H "$IP" -H 'Content-Type: application/json' -d "{\"email\":\"junwind.xqw@gmail.com\",\"password\":\"$PW3\"}" -X POST "$BASE/api/auth/login")
+chk "重置后新密码登录 200" 200 "$code"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "$IP" -H 'Content-Type: application/json' -d '{"email":"junwind.xqw@gmail.com","purpose":"register"}' -X POST "$BASE/api/auth/send-code")
+chk "已注册邮箱再注册 409" 409 "$code"
+
+# 重置密码使 epoch +1，旧主会话（$JAR）已失效，用最终密码重新登录主会话供后续小节使用
+code=$(curl -s -o /dev/null -w '%{http_code}' -c "$JAR" -H "$IP" -H 'Content-Type: application/json' -d "{\"email\":\"junwind.xqw@gmail.com\",\"password\":\"$PW3\"}" -X POST "$BASE/api/auth/login")
+chk "主会话用新密码重新登录 200" 200 "$code"
 
 echo "===== 2. 文件夹 ====="
 F1=$(curl -s -b "$JAR" -H "$IP" -H 'Content-Type: application/json' -d '{"name":"test-dir"}' -X POST "$BASE/api/folder")
@@ -193,9 +257,11 @@ LIST=$(curl -s -b "$JAR" -H "$IP" "$BASE/api/list")
 chk "根目录文件夹全部删除" "0" "$(echo "$LIST" | jget 'o.items.filter(i=>i.type==="folder").length')"
 
 echo "===== 8. 限流与登出 ====="
-# 第 1 节已发送 1 次，此处再发 5 次，第 6 次应触发“每邮箱 5 次/15 分钟”限流
+# 清空限流计数后重发 6 次：每邮箱 5 次/15 分钟，第 6 次应触发 429
+printf "DELETE FROM login_failures;\n" > "$TMP/rl.sql"
+npx wrangler d1 execute DB --local --file="$TMP/rl.sql" > /dev/null 2>&1
 last=0
-for i in $(seq 1 5); do
+for i in $(seq 1 6); do
   last=$(curl -s -o /dev/null -w '%{http_code}' -H "$IP" -H 'Content-Type: application/json' -d '{"email":"junwind.xqw@gmail.com"}' -X POST "$BASE/api/auth/send-code")
   sleep 0.3
 done
@@ -216,5 +282,5 @@ echo ""
 echo "================================"
 echo "结果: PASS=$PASS FAIL=$FAIL"
 echo "================================"
-rm -rf "$TMP" "$JAR" "$JAR2"
+rm -rf "$TMP" "$JAR" "$JAR2" "$JAR3"
 exit $FAIL

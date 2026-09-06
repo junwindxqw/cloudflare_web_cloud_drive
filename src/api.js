@@ -1,7 +1,7 @@
 // 网盘 API：邮箱验证码登录、目录、上传（R2 分片）、下载（Range）、分享
 
 import * as auth from './auth.js';
-import { sendLoginCodeMail } from './mail.js';
+import { sendCodeMail } from './mail.js';
 
 export class HttpError extends Error {
   constructor(status, message) {
@@ -363,26 +363,53 @@ async function listShares(env) {
 
 // ---------- 会话接口 ----------
 
-// ---------- 邮箱验证码登录 ----------
+// ---------- 邮箱验证码 / 注册 / 登录 / 找回密码 ----------
 
 const CODE_TTL = 10 * 60 * 1000; // 验证码 10 分钟有效
 const CODE_MAX_ATTEMPTS = 5;
-// 唯一管理员邮箱：仅该邮箱可注册/登录（可用 ALLOWED_EMAIL 变量覆盖）
+const CODE_PURPOSES = ['login', 'register', 'reset'];
+// 唯一管理员邮箱：默认仅该邮箱可注册/登录（设置 OPEN_REGISTRATION=1 后对所有人开放）
 const ADMIN_EMAIL = 'junwind.xqw@gmail.com';
 
 function normalizeEmail(s) {
   return typeof s === 'string' ? s.trim().toLowerCase() : '';
 }
 
-function allowedEmail(env) {
-  return (env.ALLOWED_EMAIL || ADMIN_EMAIL).trim().toLowerCase();
+function emailAllowed(env, email) {
+  if (String(env.OPEN_REGISTRATION || '').trim() === '1') return true;
+  return email === (env.ALLOWED_EMAIL || ADMIN_EMAIL).trim().toLowerCase();
 }
 
-async function sendLoginCode(request, env, ctx) {
+function validatePassword(pw) {
+  if (typeof pw !== 'string' || pw.length < 8 || pw.length > 128) {
+    throw new HttpError(400, '密码长度需为 8-128 位');
+  }
+  if (!/[A-Za-z]/.test(pw) || !/\d/.test(pw)) {
+    throw new HttpError(400, '密码需同时包含字母和数字');
+  }
+}
+
+// 同一邮箱同时只保留一条有效验证码，重发即覆盖；purpose 防止跨用途使用
+async function issueEmailCode(env, email, purpose) {
+  const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1000000).padStart(6, '0');
+  const codeHash = await auth.hashSharePassword(code);
+  const now = Date.now();
+  await env.DB.prepare(
+    `INSERT INTO email_codes (email, code_hash, purpose, expires_at, attempts, created_at) VALUES (?,?,?,?,0,?)
+     ON CONFLICT(email) DO UPDATE SET code_hash = excluded.code_hash, purpose = excluded.purpose,
+       expires_at = excluded.expires_at, attempts = 0, created_at = excluded.created_at`
+  )
+    .bind(email, codeHash, purpose, now + CODE_TTL, now)
+    .run();
+  return code;
+}
+
+async function sendCode(request, env, ctx) {
   const body = await readJson(request);
   const email = normalizeEmail(body.email);
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, '邮箱格式不正确');
-  if (email !== allowedEmail(env)) throw new HttpError(403, '该邮箱未获准注册本站');
+  const purpose = CODE_PURPOSES.includes(body.purpose) ? body.purpose : 'login';
+  if (!emailAllowed(env, email)) throw new HttpError(403, '该邮箱未获准注册本站');
 
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
   if (!(await auth.checkRateLimit(env, `send:${email}`, 15 * 60 * 1000, 5))) {
@@ -392,21 +419,19 @@ async function sendLoginCode(request, env, ctx) {
     throw new HttpError(429, '请求过于频繁，请 15 分钟后再试');
   }
 
-  const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1000000).padStart(6, '0');
-  const codeHash = await auth.hashSharePassword(code);
-  const now = Date.now();
-  // 同一邮箱同时只保留一条有效验证码，重发即覆盖
-  await env.DB.prepare(
-    `INSERT INTO email_codes (email, code_hash, expires_at, attempts, created_at) VALUES (?,?,?,0,?)
-     ON CONFLICT(email) DO UPDATE SET code_hash = excluded.code_hash, expires_at = excluded.expires_at, attempts = 0, created_at = excluded.created_at`
-  )
-    .bind(email, codeHash, now + CODE_TTL, now)
-    .run();
+  const user = await env.DB.prepare('SELECT password_hash FROM users WHERE email = ?').bind(email).first();
+  if (purpose === 'register' && user && user.password_hash) {
+    throw new HttpError(409, '该邮箱已注册，请直接登录或找回密码');
+  }
   ctx.waitUntil(auth.recordFailure(env, `send:${email}`));
 
+  // 找回密码：未注册的邮箱不真正发码，但仍返回成功，避免泄露“是否已注册”
+  if (purpose === 'reset' && !user) return json({ ok: true });
+
+  const code = await issueEmailCode(env, email, purpose);
   let extra = {};
   try {
-    extra = await sendLoginCodeMail(env, email, code);
+    extra = await sendCodeMail(env, email, code, purpose);
   } catch (e) {
     if (e && e.status) throw e;
     console.error('验证码邮件发送异常:', e && (e.stack || e.message || e));
@@ -415,15 +440,10 @@ async function sendLoginCode(request, env, ctx) {
   return json({ ok: true, ...(extra.devCode ? { devCode: extra.devCode } : {}) });
 }
 
-async function verifyLoginCode(request, env) {
-  const body = await readJson(request);
-  const email = normalizeEmail(body.email);
-  const code = typeof body.code === 'string' ? body.code.trim() : '';
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, '邮箱格式不正确');
-  if (!/^\d{6}$/.test(code)) throw new HttpError(400, '请输入 6 位数字验证码');
-
+// 校验验证码（purpose 必须与发码时一致）；失败自动累计尝试次数
+async function consumeEmailCode(env, email, code, purpose) {
   const row = await env.DB.prepare('SELECT * FROM email_codes WHERE email = ?').bind(email).first();
-  if (!row) throw new HttpError(400, '请先获取验证码');
+  if (!row || row.purpose !== purpose) throw new HttpError(400, '请先获取验证码');
   if (row.expires_at < Date.now()) {
     await env.DB.prepare('DELETE FROM email_codes WHERE email = ?').bind(email).run();
     throw new HttpError(400, '验证码已过期，请重新获取');
@@ -436,22 +456,140 @@ async function verifyLoginCode(request, env) {
     await env.DB.prepare('UPDATE email_codes SET attempts = attempts + 1 WHERE email = ?').bind(email).run();
     throw new HttpError(401, '验证码错误');
   }
+  await env.DB.prepare('DELETE FROM email_codes WHERE email = ?').bind(email).run();
+}
 
+// 登录成功后：更新最后登录时间并签发会话 Cookie（返回普通 headers 对象，供 json() 使用）
+async function sessionCookieHeaders(env, email) {
   const now = Date.now();
-  const existed = await env.DB.prepare('SELECT email FROM users WHERE email = ?').bind(email).first();
-  await env.DB.batch([
-    env.DB.prepare('DELETE FROM email_codes WHERE email = ?').bind(email),
-    existed
-      ? env.DB.prepare('UPDATE users SET last_login_at = ? WHERE email = ?').bind(now, email)
-      : env.DB.prepare('INSERT INTO users (email, created_at, last_login_at, is_admin) VALUES (?,?,?,1)').bind(email, now, now),
-  ]);
-  const token = await auth.createSessionToken(env, { email });
-  return json({ ok: true, registered: !existed }, 200, { 'Set-Cookie': auth.sessionCookie(token) });
+  await env.DB.prepare('UPDATE users SET last_login_at = ? WHERE email = ?').bind(now, email).run();
+  const row = await env.DB.prepare('SELECT session_epoch FROM users WHERE email = ?').bind(email).first();
+  const token = await auth.createSessionToken(env, { email, epoch: row?.session_epoch || 1 });
+  return { 'Set-Cookie': auth.sessionCookie(token) };
+}
+
+// 验证码登录：首次使用自动注册（无密码账号，可稍后在站内设置密码）
+async function verifyLoginCode(request, env) {
+  const body = await readJson(request);
+  const email = normalizeEmail(body.email);
+  const code = typeof body.code === 'string' ? body.code.trim() : '';
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, '邮箱格式不正确');
+  if (!/^\d{6}$/.test(code)) throw new HttpError(400, '请输入 6 位数字验证码');
+  if (!emailAllowed(env, email)) throw new HttpError(403, '该邮箱未获准注册本站');
+
+  await consumeEmailCode(env, email, code, 'login');
+  const user = await env.DB.prepare('SELECT email FROM users WHERE email = ?').bind(email).first();
+  if (!user) {
+    await env.DB.prepare('INSERT INTO users (email, created_at, last_login_at, is_admin, session_epoch) VALUES (?,?,?,?,1)')
+      .bind(email, Date.now(), Date.now(), email === (env.ALLOWED_EMAIL || ADMIN_EMAIL).trim().toLowerCase() ? 1 : 0)
+      .run();
+  }
+  return json({ ok: true, registered: !user }, 200, await sessionCookieHeaders(env, email));
+}
+
+// 注册：验证码 + 设置密码（已存在但未设密码的账号视为“补全注册”）
+async function register(request, env) {
+  const body = await readJson(request);
+  const email = normalizeEmail(body.email);
+  const code = typeof body.code === 'string' ? body.code.trim() : '';
+  validatePassword(body.password);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, '邮箱格式不正确');
+  if (!/^\d{6}$/.test(code)) throw new HttpError(400, '请输入 6 位数字验证码');
+  if (!emailAllowed(env, email)) throw new HttpError(403, '该邮箱未获准注册本站');
+
+  await consumeEmailCode(env, email, code, 'register');
+  const passwordHash = await auth.hashPassword(body.password);
+  const now = Date.now();
+  const isAdmin = email === (env.ALLOWED_EMAIL || ADMIN_EMAIL).trim().toLowerCase() ? 1 : 0;
+  const existing = await env.DB.prepare('SELECT password_hash FROM users WHERE email = ?').bind(email).first();
+  if (existing && existing.password_hash) throw new HttpError(409, '该邮箱已注册，请直接登录');
+  if (existing) {
+    await env.DB.prepare('UPDATE users SET password_hash = ?, is_admin = CASE WHEN is_admin = 1 THEN 1 ELSE ? END WHERE email = ?')
+      .bind(passwordHash, isAdmin, email)
+      .run();
+  } else {
+    await env.DB.prepare('INSERT INTO users (email, created_at, last_login_at, is_admin, password_hash, session_epoch) VALUES (?,?,?,?,?,1)')
+      .bind(email, now, now, isAdmin, passwordHash)
+      .run();
+  }
+  return json({ ok: true }, 200, await sessionCookieHeaders(env, email));
+}
+
+// 密码登录
+async function loginPassword(request, env, ctx) {
+  const body = await readJson(request);
+  const email = normalizeEmail(body.email);
+  const password = typeof body.password === 'string' ? body.password : '';
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !password) throw new HttpError(400, '请输入邮箱和密码');
+
+  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+  if (!(await auth.checkRateLimit(env, `pw:${email}`, 15 * 60 * 1000, 10))) {
+    throw new HttpError(429, '尝试次数过多，请 15 分钟后再试');
+  }
+  if (!(await auth.checkRateLimit(env, `pwip:${ip}`, 15 * 60 * 1000, 30))) {
+    throw new HttpError(429, '尝试次数过多，请 15 分钟后再试');
+  }
+
+  const user = await env.DB.prepare('SELECT email, password_hash FROM users WHERE email = ?').bind(email).first();
+  // 统一错误信息，不泄露邮箱是否已注册
+  const fail = (msg) => {
+    ctx.waitUntil(auth.recordFailure(env, `pw:${email}`));
+    throw new HttpError(401, msg);
+  };
+  if (!user || !user.password_hash) fail('邮箱或密码错误');
+  if (!(await auth.verifyPassword(user.password_hash, password))) fail('邮箱或密码错误');
+
+  await env.DB.prepare('DELETE FROM login_failures WHERE ip = ? OR ip = ?').bind(`pw:${email}`, `pwip:${ip}`).run();
+  return json({ ok: true }, 200, await sessionCookieHeaders(env, email));
+}
+
+// 找回密码：验证码 + 设置新密码（旧会话全部失效）
+async function resetPassword(request, env) {
+  const body = await readJson(request);
+  const email = normalizeEmail(body.email);
+  const code = typeof body.code === 'string' ? body.code.trim() : '';
+  validatePassword(body.password);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, '邮箱格式不正确');
+  if (!/^\d{6}$/.test(code)) throw new HttpError(400, '请输入 6 位数字验证码');
+
+  const user = await env.DB.prepare('SELECT email FROM users WHERE email = ?').bind(email).first();
+  if (!user) throw new HttpError(404, '该邮箱尚未注册');
+  await consumeEmailCode(env, email, code, 'reset');
+  await env.DB.prepare('UPDATE users SET password_hash = ?, session_epoch = session_epoch + 1 WHERE email = ?')
+    .bind(await auth.hashPassword(body.password), email)
+    .run();
+  return json({ ok: true });
+}
+
+// 修改密码（需登录）：设置过密码需验证旧密码；成功后旧会话失效并下发新会话
+async function changePassword(request, env, session) {
+  const body = await readJson(request);
+  validatePassword(body.newPassword);
+  const user = await env.DB.prepare('SELECT password_hash, session_epoch FROM users WHERE email = ?').bind(session.email).first();
+  if (!user) throw new HttpError(401, '账号不存在');
+  if (user.password_hash) {
+    if (!(typeof body.oldPassword === 'string' && (await auth.verifyPassword(user.password_hash, body.oldPassword)))) {
+      throw new HttpError(401, '当前密码错误');
+    }
+  }
+  const epoch = (user.session_epoch || 1) + 1;
+  await env.DB.prepare('UPDATE users SET password_hash = ?, session_epoch = ? WHERE email = ?')
+    .bind(await auth.hashPassword(body.newPassword), epoch, session.email)
+    .run();
+  const token = await auth.createSessionToken(env, { email: session.email, epoch });
+  return json({ ok: true }, 200, { 'Set-Cookie': auth.sessionCookie(token) });
 }
 
 async function me(env, session) {
   const row = await env.DB.prepare("SELECT COUNT(*) AS c, COALESCE(SUM(size),0) AS s FROM files WHERE type = 'file'").first();
-  return json({ email: session?.email || null, isAdmin: true, fileCount: row?.c || 0, usage: row?.s || 0 });
+  const user = await env.DB.prepare('SELECT password_hash FROM users WHERE email = ?').bind(session?.email || '').first();
+  return json({
+    email: session?.email || null,
+    isAdmin: true,
+    hasPassword: !!(user && user.password_hash),
+    fileCount: row?.c || 0,
+    usage: row?.s || 0,
+  });
 }
 
 async function listDir(request, env, url) {
@@ -554,14 +692,22 @@ export async function handleApi(request, env, ctx) {
   try {
     if (seg[1] === 'pub') return await handlePub(request, env, ctx, url, seg, method);
 
-    // 邮箱验证码登录（无需会话）
+    // 认证接口（无需会话）
     if (seg[1] === 'auth' && seg.length === 3) {
-      if (seg[2] === 'send-code' && method === 'POST') return await sendLoginCode(request, env, ctx);
+      if (seg[2] === 'send-code' && method === 'POST') return await sendCode(request, env, ctx);
       if (seg[2] === 'verify' && method === 'POST') return await verifyLoginCode(request, env);
+      if (seg[2] === 'register' && method === 'POST') return await register(request, env);
+      if (seg[2] === 'login' && method === 'POST') return await loginPassword(request, env, ctx);
+      if (seg[2] === 'reset-password' && method === 'POST') return await resetPassword(request, env);
     }
 
     const session = await auth.verifySession(request, env);
     if (!session) return json({ error: '未登录或会话已过期' }, 401);
+
+    // 需登录的认证接口
+    if (seg[1] === 'auth' && seg[2] === 'change-password' && method === 'POST' && seg.length === 3) {
+      return await changePassword(request, env, session);
+    }
 
     if (seg[1] === 'logout' && method === 'POST' && seg.length === 2) {
       return json({ ok: true }, 200, { 'Set-Cookie': auth.clearSessionCookie() });

@@ -70,7 +70,7 @@ export function timingSafeEqualStr(a, b) {
 
 const SESSION_TTL = 7 * 24 * 3600 * 1000;
 
-// payload 中带 email，登录后所有接口可识别当前用户
+// payload 中带 email / epoch；epoch 与 users 表不一致时会话失效（改密即全端下线）
 export async function createSessionToken(env, data = {}) {
   const payload = b64urlEncode(enc.encode(JSON.stringify({ exp: Date.now() + SESSION_TTL, ...data })));
   return `${payload}.${await hmacSign(env, payload)}`;
@@ -83,13 +83,19 @@ export async function verifySession(request, env) {
   if (dot <= 0) return null;
   const payload = token.slice(0, dot);
   if (!(await hmacVerify(env, payload, token.slice(dot + 1)))) return null;
+  let data;
   try {
-    const data = JSON.parse(new TextDecoder().decode(b64urlDecode(payload)));
+    data = JSON.parse(new TextDecoder().decode(b64urlDecode(payload)));
     if (!data.exp || data.exp < Date.now()) return null;
-    return data;
   } catch {
     return null;
   }
+  // 带邮箱的会话需与 users 表的当前 epoch 一致（重置/修改密码后旧会话全部作废）
+  if (data.email && env.DB) {
+    const row = await env.DB.prepare('SELECT session_epoch FROM users WHERE email = ?').bind(data.email).first();
+    if (!row || (row.session_epoch || 1) !== (data.epoch || 1)) return null;
+  }
+  return data;
 }
 
 export function sessionCookie(token) {
@@ -155,6 +161,35 @@ export async function verifySharePassword(stored, password) {
   if (i <= 0) return false;
   const expected = hex(await sha256(`${stored.slice(0, i)}:${password}`));
   return timingSafeEqualStr(expected, stored.slice(i + 1));
+}
+
+// ---------- 用户密码哈希（PBKDF2） ----------
+// 迭代次数受 Workers 免费版 10ms CPU 限制约束：25k 次 PBKDF2-SHA256 约 3-6ms CPU，
+// 叠加登录限流（每邮箱 15 分钟 10 次）足以抵御在线爆破。
+const PBKDF2_ITERATIONS = 25000;
+
+async function pbkdf2(password, salt, iterations) {
+  const key = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
+  return crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations }, key, 256);
+}
+
+export async function hashPassword(password) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const bits = await pbkdf2(password, salt, PBKDF2_ITERATIONS);
+  return `pbkdf2$${PBKDF2_ITERATIONS}$${b64urlEncode(salt)}$${b64urlEncode(new Uint8Array(bits))}`;
+}
+
+export async function verifyPassword(stored, password) {
+  const parts = String(stored || '').split('$');
+  if (parts.length !== 4 || parts[0] !== 'pbkdf2') return false;
+  const iterations = Number(parts[1]);
+  if (!Number.isInteger(iterations) || iterations < 1 || iterations > 1000000) return false;
+  try {
+    const bits = await pbkdf2(password, b64urlDecode(parts[2]), iterations);
+    return timingSafeEqualStr(b64urlEncode(new Uint8Array(bits)), parts[3]);
+  } catch {
+    return false;
+  }
 }
 
 // ---------- 登录限流（基于 D1，按 IP 计数） ----------

@@ -24,7 +24,8 @@ export async function api(path, opts = {}) {
     data = await res.json();
   } catch {}
   if (!res.ok) {
-    if (res.status === 401) window.dispatchEvent(new CustomEvent('jd:unauthorized'));
+    // 认证接口的 401 属于正常业务错误（密码错误等），由页面行内提示；其余 401 视为会话过期
+    if (res.status === 401 && !path.startsWith('/api/auth/')) window.dispatchEvent(new CustomEvent('jd:unauthorized'));
     const err = new Error((data && data.error) || `请求失败 (${res.status})`);
     err.status = res.status;
     throw err;

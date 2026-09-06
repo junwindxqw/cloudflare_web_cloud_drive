@@ -26,136 +26,336 @@ async function boot() {
     const m = location.hash.match(/^#\/folder\/([\w-]+)$/);
     await loadDir(m ? m[1] : null, { push: false });
   } catch {
-    renderLogin();
+    renderAuth();
   }
   booted = true;
 }
 
 window.addEventListener('jd:unauthorized', () => {
-  renderLogin();
+  renderAuth('login');
   if (booted) toast('登录已过期，请重新登录', 'err');
 });
 
-function renderLogin() {
+// ---------------- 认证（登录 / 注册 / 找回密码） ----------------
+
+const AUTH_HASH = { '#/login': 'login', '#/register': 'register', '#/forgot': 'forgot' };
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function renderAuth(view = AUTH_HASH[location.hash] || 'login') {
+  clearInterval(authCountdown.timer);
+  history.replaceState(null, '', `#/${view}`);
   document.getElementById('app').innerHTML = `
     <div class="login-wrap">
-      <form class="login-card" id="login-form">
+      <div class="login-card auth-card">
         <div class="login-logo"><svg viewBox="0 0 24 24"><path d="M6 4h5l2 3h5a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"/></svg></div>
         <h1>JunDrive</h1>
         <div class="muted">基于 Cloudflare 的私有云盘</div>
-        <div id="login-step1">
-          <input type="email" class="input" id="login-email" placeholder="请输入邮箱地址" autocomplete="email" />
-          <button class="btn btn-primary" style="width:100%;justify-content:center" type="submit" id="login-send">获取验证码</button>
-          <div class="login-hint">首次使用将自动注册，仅限授权邮箱</div>
-        </div>
-        <div id="login-step2" style="display:none">
-          <input type="text" class="input login-code" id="login-code" placeholder="6 位验证码" inputmode="numeric" maxlength="6" autocomplete="one-time-code" />
-          <button class="btn btn-primary" style="width:100%;justify-content:center" type="submit" id="login-verify">登录</button>
-          <div class="login-hint">
-            已发送至 <b id="login-sent-to"></b> · <button type="button" class="link-btn" id="login-resend"></button> · <button type="button" class="link-btn" id="login-back">换邮箱</button>
-          </div>
-        </div>
-        <div class="login-err" id="login-err"></div>
-      </form>
+        <nav class="auth-tabs" id="auth-tabs">
+          <button type="button" data-view="login" class="${view === 'login' ? 'active' : ''}">登录</button>
+          <button type="button" data-view="register" class="${view === 'register' ? 'active' : ''}">注册</button>
+          <button type="button" data-view="forgot" class="${view === 'forgot' ? 'active' : ''}">找回密码</button>
+        </nav>
+        <div id="auth-view"></div>
+      </div>
       <div class="login-foot">Powered by Cloudflare Workers · R2 · D1 · Resend</div>
     </div>`;
 
-  let email = '';
-  let countdown = 0;
-  let timer = null;
-
-  const errEl = () => document.getElementById('login-err');
-  const renderCountdown = () => {
-    const btn = document.getElementById('login-resend');
-    if (!btn) return;
-    btn.textContent = countdown > 0 ? `${countdown}s 后重发` : '重新发送';
-    btn.disabled = countdown > 0;
-  };
-  const startCountdown = () => {
-    countdown = 60;
-    renderCountdown();
-    clearInterval(timer);
-    timer = setInterval(() => {
-      countdown--;
-      renderCountdown();
-      if (countdown <= 0) clearInterval(timer);
-    }, 1000);
-  };
-
-  const showStep2 = () => {
-    document.getElementById('login-step1').style.display = 'none';
-    document.getElementById('login-step2').style.display = '';
-    document.getElementById('login-sent-to').textContent = email;
-    document.getElementById('login-code').focus();
-    startCountdown();
-  };
-
-  const sendCode = async () => {
-    errEl().textContent = '';
-    const value = document.getElementById('login-email').value.trim();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
-      errEl().textContent = '请输入正确的邮箱地址';
-      return false;
-    }
-    email = value;
-    const btn = document.getElementById('login-send');
-    btn.disabled = true;
-    try {
-      await api('/api/auth/send-code', { method: 'POST', body: { email } });
-      showStep2();
-      return true;
-    } catch (err) {
-      errEl().textContent = err.message;
-      return false;
-    } finally {
-      btn.disabled = false;
-    }
-  };
-
-  const verify = async () => {
-    errEl().textContent = '';
-    const code = document.getElementById('login-code').value.trim();
-    if (!/^\d{6}$/.test(code)) {
-      errEl().textContent = '请输入 6 位数字验证码';
-      return;
-    }
-    const btn = document.getElementById('login-verify');
-    btn.disabled = true;
-    try {
-      await api('/api/auth/verify', { method: 'POST', body: { email, code } });
-      await refreshMe();
-      renderMain();
-      loadDir(null, { push: false });
-    } catch (err) {
-      errEl().textContent = err.message;
-      btn.disabled = false;
-    }
-  };
-
-  document.getElementById('login-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    if (document.getElementById('login-step2').style.display === 'none') await sendCode();
-    else await verify();
+  document.getElementById('auth-tabs').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-view]');
+    if (btn && !btn.classList.contains('active')) renderAuth(btn.dataset.view);
   });
-  document.getElementById('login-resend').addEventListener('click', async () => {
-    if (countdown > 0) return;
-    errEl().textContent = '';
-    try {
-      await api('/api/auth/send-code', { method: 'POST', body: { email } });
-      startCountdown();
-    } catch (err) {
-      errEl().textContent = err.message;
-    }
-  });
-  document.getElementById('login-back').addEventListener('click', () => {
-    clearInterval(timer);
-    document.getElementById('login-step2').style.display = 'none';
-    document.getElementById('login-step1').style.display = '';
-    errEl().textContent = '';
-    document.getElementById('login-email').focus();
-  });
-  document.getElementById('login-email').focus();
+  renderAuthView(view);
 }
+
+const PW_EYE = '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>';
+
+// 通用：带可见性切换的密码输入框
+function pwField(id, placeholder, autocomplete = 'new-password') {
+  return `
+    <div class="pw-input-wrap">
+      <input type="password" class="input" id="${id}" placeholder="${placeholder}" autocomplete="${autocomplete}" />
+      <button type="button" class="pw-eye" data-eye="${id}" title="显示/隐藏密码">${PW_EYE}</button>
+    </div>`;
+}
+
+// 通用：邮箱 + 验证码行（含获取按钮倒计时）
+function codeField() {
+  return `
+    <div class="code-row">
+      <input type="text" class="input" id="auth-code" placeholder="6 位验证码" inputmode="numeric" maxlength="6" autocomplete="one-time-code" />
+      <button type="button" class="btn" id="auth-send">获取验证码</button>
+    </div>`;
+}
+
+function bindPwEyes(root) {
+  root.querySelectorAll('[data-eye]').forEach((btn) =>
+    btn.addEventListener('click', () => {
+      const input = document.getElementById(btn.dataset.eye);
+      input.type = input.type === 'password' ? 'text' : 'password';
+      btn.classList.toggle('on', input.type === 'text');
+    })
+  );
+}
+
+const authCountdown = { timer: null, left: 0 };
+function startCodeCountdown() {
+  authCountdown.left = 60;
+  paintCountdown();
+  clearInterval(authCountdown.timer);
+  authCountdown.timer = setInterval(() => {
+    authCountdown.left--;
+    paintCountdown();
+    if (authCountdown.left <= 0) clearInterval(authCountdown.timer);
+  }, 1000);
+}
+function paintCountdown() {
+  const btn = document.getElementById('auth-send');
+  if (!btn) return;
+  if (authCountdown.left > 0) {
+    btn.disabled = true;
+    btn.textContent = `${authCountdown.left}s 后重发`;
+  } else {
+    btn.disabled = false;
+    btn.textContent = '获取验证码';
+  }
+}
+
+// 通用：发送验证码（purpose: register / reset / login）
+async function sendAuthCode(purpose) {
+  const err = document.getElementById('auth-err');
+  err.textContent = '';
+  const email = document.getElementById('auth-email').value.trim();
+  if (!EMAIL_RE.test(email)) {
+    err.textContent = '请输入正确的邮箱地址';
+    return false;
+  }
+  const btn = document.getElementById('auth-send');
+  btn.disabled = true;
+  btn.textContent = '发送中…';
+  try {
+    await api('/api/auth/send-code', { method: 'POST', body: { email, purpose } });
+    toast(`验证码已发送至 ${email}`, 'ok', 6000);
+    startCodeCountdown();
+    document.getElementById('auth-code').focus();
+    return true;
+  } catch (e) {
+    err.textContent = e.message;
+    btn.disabled = false;
+    btn.textContent = '获取验证码';
+    return false;
+  }
+}
+
+function authBusy(btn, busy) {
+  btn.disabled = busy;
+  btn.style.opacity = busy ? '0.6' : '';
+}
+
+function renderAuthView(view) {
+  const box = document.getElementById('auth-view');
+  const foot = (text, target, targetText) =>
+    `<div class="auth-foot">${text}<button type="button" class="link-btn" data-goto="${target}">${targetText}</button></div>`;
+
+  if (view === 'login') {
+    box.innerHTML = `
+      <form id="auth-form" novalidate>
+        <input type="email" class="input" id="auth-email" placeholder="邮箱地址" autocomplete="email" />
+        <div id="auth-pw-block">
+          ${pwField('auth-password', '密码', 'current-password')}
+          <div class="auth-row">
+            <button type="button" class="link-btn" id="auth-mode-code">使用验证码登录</button>
+            <button type="button" class="link-btn" data-goto="forgot">忘记密码？</button>
+          </div>
+        </div>
+        <div id="auth-code-block" style="display:none">
+          ${codeField()}
+          <div class="auth-row">
+            <button type="button" class="link-btn" id="auth-mode-pw">使用密码登录</button>
+            <span class="muted" style="font-size:12px">未注册的邮箱将自动创建账号</span>
+          </div>
+        </div>
+        <div class="auth-err" id="auth-err"></div>
+        <button class="btn btn-primary auth-submit" type="submit" id="auth-submit">登 录</button>
+      </form>
+      ${foot('没有账号？', 'register', '立即注册')}`;
+    bindPwEyes(box);
+    let mode = 'password';
+    const switchMode = (m) => {
+      mode = m;
+      document.getElementById('auth-pw-block').style.display = m === 'password' ? '' : 'none';
+      document.getElementById('auth-code-block').style.display = m === 'code' ? '' : 'none';
+      document.getElementById('auth-err').textContent = '';
+      document.getElementById('auth-submit').textContent = m === 'password' ? '登 录' : '验证码登录';
+    };
+    document.getElementById('auth-mode-code').addEventListener('click', () => switchMode('code'));
+    document.getElementById('auth-mode-pw').addEventListener('click', () => switchMode('password'));
+    document.getElementById('auth-send').addEventListener('click', () => sendAuthCode('login'));
+
+    document.getElementById('auth-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const err = document.getElementById('auth-err');
+      err.textContent = '';
+      const email = document.getElementById('auth-email').value.trim();
+      if (!EMAIL_RE.test(email)) return (err.textContent = '请输入正确的邮箱地址');
+      const submit = document.getElementById('auth-submit');
+      authBusy(submit, true);
+      try {
+        if (mode === 'password') {
+          const password = document.getElementById('auth-password').value;
+          if (!password) return (err.textContent = '请输入密码'), authBusy(submit, false);
+          await api('/api/auth/login', { method: 'POST', body: { email, password } });
+        } else {
+          const code = document.getElementById('auth-code').value.trim();
+          if (!/^\d{6}$/.test(code)) return (err.textContent = '请输入 6 位数字验证码'), authBusy(submit, false);
+          await api('/api/auth/verify', { method: 'POST', body: { email, code } });
+        }
+        await enterApp();
+      } catch (e2) {
+        err.textContent = e2.message;
+      } finally {
+        authBusy(submit, false);
+      }
+    });
+  } else if (view === 'register') {
+    box.innerHTML = `
+      <form id="auth-form" novalidate>
+        <input type="email" class="input" id="auth-email" placeholder="邮箱地址" autocomplete="email" />
+        ${codeField()}
+        ${pwField('auth-password', '设置密码（8 位以上，含字母和数字）')}
+        ${pwField('auth-password2', '确认密码')}
+        <div class="auth-err" id="auth-err"></div>
+        <button class="btn btn-primary auth-submit" type="submit" id="auth-submit">注册并登录</button>
+      </form>
+      ${foot('已有账号？', 'login', '直接登录')}`;
+    bindPwEyes(box);
+    document.getElementById('auth-send').addEventListener('click', () => sendAuthCode('register'));
+    document.getElementById('auth-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const err = document.getElementById('auth-err');
+      err.textContent = '';
+      const email = document.getElementById('auth-email').value.trim();
+      const code = document.getElementById('auth-code').value.trim();
+      const password = document.getElementById('auth-password').value;
+      const password2 = document.getElementById('auth-password2').value;
+      if (!EMAIL_RE.test(email)) return (err.textContent = '请输入正确的邮箱地址');
+      if (!/^\d{6}$/.test(code)) return (err.textContent = '请输入 6 位数字验证码');
+      if (password.length < 8 || password.length > 128) return (err.textContent = '密码长度需为 8-128 位');
+      if (!/[A-Za-z]/.test(password) || !/\d/.test(password)) return (err.textContent = '密码需同时包含字母和数字');
+      if (password !== password2) return (err.textContent = '两次输入的密码不一致');
+      const submit = document.getElementById('auth-submit');
+      authBusy(submit, true);
+      try {
+        await api('/api/auth/register', { method: 'POST', body: { email, code, password } });
+        await enterApp();
+      } catch (e2) {
+        err.textContent = e2.message;
+      } finally {
+        authBusy(submit, false);
+      }
+    });
+  } else {
+    box.innerHTML = `
+      <form id="auth-form" novalidate>
+        <input type="email" class="input" id="auth-email" placeholder="注册时使用的邮箱" autocomplete="email" />
+        ${codeField()}
+        ${pwField('auth-password', '新密码（8 位以上，含字母和数字）')}
+        ${pwField('auth-password2', '确认新密码')}
+        <div class="auth-err" id="auth-err"></div>
+        <button class="btn btn-primary auth-submit" type="submit" id="auth-submit">重置密码</button>
+      </form>
+      ${foot('想起密码了？', 'login', '去登录')}`;
+    bindPwEyes(box);
+    document.getElementById('auth-send').addEventListener('click', () => sendAuthCode('reset'));
+    document.getElementById('auth-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const err = document.getElementById('auth-err');
+      err.textContent = '';
+      const email = document.getElementById('auth-email').value.trim();
+      const code = document.getElementById('auth-code').value.trim();
+      const password = document.getElementById('auth-password').value;
+      const password2 = document.getElementById('auth-password2').value;
+      if (!EMAIL_RE.test(email)) return (err.textContent = '请输入正确的邮箱地址');
+      if (!/^\d{6}$/.test(code)) return (err.textContent = '请输入 6 位数字验证码');
+      if (password.length < 8 || password.length > 128) return (err.textContent = '密码长度需为 8-128 位');
+      if (!/[A-Za-z]/.test(password) || !/\d/.test(password)) return (err.textContent = '密码需同时包含字母和数字');
+      if (password !== password2) return (err.textContent = '两次输入的密码不一致');
+      const submit = document.getElementById('auth-submit');
+      authBusy(submit, true);
+      try {
+        await api('/api/auth/reset-password', { method: 'POST', body: { email, code, password } });
+        toast('密码已重置，请使用新密码登录', 'ok', 8000);
+        renderAuth('login');
+        const emailInput = document.getElementById('auth-email');
+        if (emailInput) {
+          emailInput.value = email;
+          document.getElementById('auth-password').focus();
+        }
+      } catch (e2) {
+        err.textContent = e2.message;
+      } finally {
+        authBusy(submit, false);
+      }
+    });
+  }
+
+  // 视图内跳转
+  box.querySelectorAll('[data-goto]').forEach((b) => b.addEventListener('click', () => renderAuth(b.dataset.goto)));
+  const email = box.querySelector('#auth-email');
+  if (email) email.focus();
+}
+
+// 登录/注册成功后进入主界面；未设密码的账号温和提示补设
+async function enterApp() {
+  await refreshMe();
+  renderMain();
+  const m = location.hash.match(/^#\/folder\/([\w-]+)$/);
+  loadDir(m ? m[1] : null, { push: false });
+  history.replaceState(null, '', location.pathname);
+  if (state.usage && state.usage.hasPassword === false) {
+    setTimeout(() => openChangePasswordDialog({ firstTime: true }), 600);
+  }
+}
+
+// 设置 / 修改密码弹窗（firstTime = 首次设置，无需旧密码）
+function openChangePasswordDialog({ firstTime = false } = {}) {
+  const m = openModal(`
+    <div class="modal-body">
+      <h3>${firstTime ? '设置密码' : '修改密码'}</h3>
+      <p class="muted" style="font-size:13px">${firstTime ? '当前账号尚未设置密码，设置后可用邮箱 + 密码登录。' : `账号：${escapeHtml(state.usage?.email || '')}`}</p>
+      ${firstTime ? '' : `<div class="field"><label>当前密码</label>${pwField('cp-old', '当前密码', 'current-password')}</div>`}
+      <div class="field"><label>新密码</label>${pwField('cp-new', '新密码（8 位以上，含字母和数字）')}</div>
+      <div class="field"><label>确认新密码</label>${pwField('cp-new2', '再次输入新密码')}</div>
+      <div class="auth-err" id="cp-err"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" data-close>${firstTime ? '稍后再说' : '取消'}</button>
+      <button class="btn btn-primary" id="cp-ok">保存</button>
+    </div>`);
+  bindPwEyes(m);
+  m.querySelector('#cp-old')?.focus();
+  m.querySelector('#cp-ok').addEventListener('click', async () => {
+    const err = m.querySelector('#cp-err');
+    err.textContent = '';
+    const oldPassword = m.querySelector('#cp-old')?.value || undefined;
+    const newPassword = m.querySelector('#cp-new').value;
+    const confirm = m.querySelector('#cp-new2').value;
+    if (newPassword.length < 8 || newPassword.length > 128) return (err.textContent = '密码长度需为 8-128 位');
+    if (!/[A-Za-z]/.test(newPassword) || !/\d/.test(newPassword)) return (err.textContent = '密码需同时包含字母和数字');
+    if (newPassword !== confirm) return (err.textContent = '两次输入的密码不一致');
+    const btn = m.querySelector('#cp-ok');
+    authBusy(btn, true);
+    try {
+      await api('/api/auth/change-password', { method: 'POST', body: { oldPassword, newPassword } });
+      m.close();
+      toast(firstTime ? '密码已设置，下次可用邮箱 + 密码登录' : '密码已修改，其他设备需重新登录', 'ok', 8000);
+      refreshMe().catch(() => {});
+    } catch (e) {
+      err.textContent = e.message;
+      authBusy(btn, false);
+    }
+  });
+}
+
 
 // ---------------- 主界面骨架 ----------------
 
@@ -568,7 +768,8 @@ function showItemMenu(it, anchor) {
 
 function showUserMenu(anchor) {
   const menu = showMenu(
-    `<div class="menu-head">已用空间：${fmtSize(state.usage?.usage || 0)} · ${state.usage?.fileCount || 0} 个文件</div>
+    `<div class="menu-head">${escapeHtml(state.usage?.email || 'admin')}<br><span class="muted" style="font-size:12px">已用 ${fmtSize(state.usage?.usage || 0)} · ${state.usage?.fileCount || 0} 个文件</span></div>
+     <button data-act="password">🔑 ${state.usage?.hasPassword ? '修改密码' : '设置密码'}</button>
      <button data-act="shares">🔗 我的分享</button>
      <button data-act="logout" class="danger">🚪 退出登录</button>`,
     anchor
@@ -577,12 +778,13 @@ function showUserMenu(anchor) {
     const act = e.target.closest('[data-act]')?.dataset.act;
     if (!act) return;
     closeMenu();
+    if (act === 'password') openChangePasswordDialog({ firstTime: !state.usage?.hasPassword });
     if (act === 'shares') openSharesDialog();
     if (act === 'logout') {
       try {
         await api('/api/logout', { method: 'POST' });
       } catch {}
-      renderLogin();
+      renderAuth('login');
     }
   });
 }
