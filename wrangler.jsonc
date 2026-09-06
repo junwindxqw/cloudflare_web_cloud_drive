@@ -1,0 +1,33 @@
+{
+  // Cloudflare 网盘：Workers(计算) + R2(存储) + D1(元数据) + 静态资源(前端)
+  // 全部为 Cloudflare 免费服务
+  "name": "jun-drive",
+  "main": "src/worker.js",
+  "compatibility_date": "2025-11-01",
+  "account_id": "fe25574c2fb79ccf6071391962a40576",
+  "routes": [
+    { "pattern": "drive.junwind.site", "custom_domain": true }
+  ],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "r2_buckets": [
+    {
+      "binding": "BUCKET",
+      "bucket_name": "jun-drive-files"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "jun-drive-db",
+      "database_id": "5ef4ef70-deea-4102-b3d9-45095c73a69e"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

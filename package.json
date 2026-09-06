@@ -1,0 +1,18 @@
+{
+  "name": "cloudflare-web-cloud-drive",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "基于 Cloudflare Workers + R2 + D1 的免费网盘",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:init:local": "wrangler d1 execute DB --local --file=schema.sql",
+    "db:init:remote": "wrangler d1 execute jun-drive-db --remote --file=schema.sql",
+    "tail": "wrangler tail",
+    "test": "bash tests/api-test.sh"
+  },
+  "devDependencies": {
+    "wrangler": "^4.129.0"
+  }
+}
