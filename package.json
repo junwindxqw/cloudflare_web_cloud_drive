@@ -10,7 +10,7 @@
     "db:init:local": "wrangler d1 execute DB --local --file=schema.sql",
     "db:init:remote": "wrangler d1 execute jun-drive-db --remote --file=schema.sql",
     "tail": "wrangler tail",
-    "test": "bash tests/api-test.sh"
+    "test": "node tests/image-probe-test.mjs && bash tests/api-test.sh"
   },
   "devDependencies": {
     "wrangler": "^4.129.0"

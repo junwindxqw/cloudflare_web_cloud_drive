@@ -15,6 +15,7 @@
 - 🔐 完整账号体系：**注册 / 登录 / 找回密码** 三个页面（标签页切换），密码使用 PBKDF2 加盐哈希存储，支持邮箱验证码登录、忘记密码自助重置、站内修改密码（改密后其他设备全部下线）；Resend 发信
 - 👤 唯一管理员：默认仅授权邮箱可注册/登录（首次登录自动注册）；设置 `OPEN_REGISTRATION=1` 后对所有人开放注册（注意：当前网盘为单用户共享模型，开放前请先评估）
 - 📤 上传：单文件 / 整个文件夹（保留目录结构）/ 桌面拖拽 / **Ctrl+V 直接粘贴文件或截图**；R2 分片上传，单文件最大 8 GB，实时进度、停滞自动重试、可取消；上传完成提示 10 秒后自动消失
+- 🖼 **图床**：独立的图片上传/管理视图，上传即得公开直链 `/i/<id>.<ext>`，支持点击/拖拽/Ctrl+V 截图上传、实时进度；一键复制 **URL / Markdown / HTML / BBCode** 四种格式（可记住选择、上传后自动复制）；画廊带尺寸/大小/时间与批量复制、批量删除；网盘里的图片可一键转存到图床
 - 📥 下载：支持断点续传（HTTP Range），视频/音频可拖动进度条
 - 📁 文件夹：新建、重命名、移动、递归删除；同名自动加 `(1)` 后缀
 - 🔗 分享：公开链接，提取码自动生成并直接附带在链接上（`?pwd=xxxx`，访客打开即自动验证，免输入，同百度网盘）；可选有效期（1/7/30 天/永久），支持文件与整个文件夹；分享管理页可复制/撤销
@@ -70,10 +71,18 @@ npx wrangler deploy
 ```bash
 npm run db:init:local        # 初始化本地 D1（首次）
 npm run dev                  # http://127.0.0.1:8787 ，本地变量见 .dev.vars
-npm test                     # API 集成测试（需 dev 服务运行中）
+npm test                     # 图片格式单测 + API 集成测试（集成测试需 dev 服务运行中）
 ```
 
 本地开发默认 `DEV_MAIL_LOG=1`：不真正发邮件，验证码直接在 `/api/auth/send-code` 响应的 `devCode` 字段返回（也会打印到 dev 控制台）。生产环境切勿设置该变量。
+
+### 图床说明
+
+- 入口：顶栏「🖼 图床」标签，或直接访问 `#/imagebed`；图床与网盘数据相互独立（图床图片存在 R2 的 `images/` 前缀下）。
+- 上传：点击上传区、拖拽、或任意界面 Ctrl+V 粘贴（截图亦可）；单张 ≤ 10 MB，仅接受 **JPG / PNG / GIF / WebP / AVIF / BMP / ICO**（按文件内容魔数判定，扩展名与声明的 MIME 均不采信）。
+- 直链：`https://<你的域名>/i/<id>.<ext>`，**任何人可直接访问**（供外站以 `<img>` 嵌入），带一年不可变缓存与 `nosniff`；删除图片后直链立即 404。请勿上传敏感图片。
+- 复制格式：URL / Markdown / HTML / BBCode 可切换并记住，上传完成可自动复制；画廊支持多选后批量复制、批量删除。
+- 已有部署升级：`npx wrangler d1 execute jun-drive-db --remote --file=migrations/003-imagebed.sql`（仅新增 images 表，不影响网盘数据）。
 
 ## 目录结构
 
@@ -87,11 +96,13 @@ npm test                     # API 集成测试（需 dev 服务运行中）
 │   └── mail.js         # Resend 邮件发送（含出站 URL 校验）
 ├── public/             # 前端 SPA（无构建，直接托管）
 │   ├── index.html
-│   ├── app.js          # 网盘主应用
+│   ├── app.js          # 网盘主应用（含图床视图）
 │   ├── share.js        # 公开分享页 /s/<token>
 │   ├── common.js       # 公共工具
 │   └── style.css
-└── tests/api-test.sh   # API 集成测试
+└── tests/
+    ├── api-test.sh         # API 集成测试
+    └── image-probe-test.mjs # 图片格式识别/尺寸解析单测
 ```
 
 ## 安全设计
@@ -103,6 +114,7 @@ npm test                     # API 集成测试（需 dev 服务运行中）
 - 登录失败提示统一为“邮箱或密码错误”，不泄露账号是否存在；找回密码对未注册邮箱静默忽略
 - 分享访问范围用递归 CTE 严格限制在分享根的子树内，目录穿越/越权访问返回 403
 - 出站邮件请求固定为 `https://api.resend.com`，发起前校验协议与 host（拒绝 localhost/私有/保留地址）
+- 图床：仅登录可上传/管理（每邮箱 15 分钟 200 次），公开直链 `/i/<id>.<ext>` 不做鉴权但 URL 为随机 UUID；图片类型按**文件头魔数**判定（拒绝 SVG/HTML 等可执行内容，扩展名与客户端声明的 MIME 一概不信），落库 Content-Type 只来自服务端白名单，响应带 `X-Content-Type-Options: nosniff` 与 `Content-Security-Policy: sandbox`
 - 上传的 HTML/SVG 等可执行类型不提供内联预览；所有文件响应带 `X-Content-Type-Options: nosniff` 与 `Content-Security-Policy: sandbox`
 - 文件名规范化（拒绝路径分隔符/控制字符），R2 对象 key 为 UUID，与用户输入完全隔离
 

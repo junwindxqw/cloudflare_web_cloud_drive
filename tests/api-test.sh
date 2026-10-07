@@ -19,7 +19,7 @@ chk() {
 jget() { node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const o=JSON.parse(d);const v=$1;console.log(typeof v==='object'&&v!==null?JSON.stringify(v):v)}catch(e){console.log('PARSE_ERR')}})"; }
 
 echo "===== 0. 清理本地测试数据 ====="
-printf "DELETE FROM files; DELETE FROM shares; DELETE FROM uploads; DELETE FROM login_failures; DELETE FROM email_codes; DELETE FROM users;\n" > "$TMP/clean.sql"
+printf "DELETE FROM files; DELETE FROM shares; DELETE FROM uploads; DELETE FROM login_failures; DELETE FROM email_codes; DELETE FROM users; DELETE FROM images;\n" > "$TMP/clean.sql"
 npx wrangler d1 execute DB --local --file="$TMP/clean.sql" > /dev/null 2>&1 || { echo "警告: 清理命令执行失败"; npx wrangler d1 execute DB --local --file="$TMP/clean.sql"; }
 echo "已清理本地 D1 测试表"
 
@@ -255,6 +255,185 @@ chk "文件夹删除后分享 404" 404 "$code"
 
 LIST=$(curl -s -b "$JAR" -H "$IP" "$BASE/api/list")
 chk "根目录文件夹全部删除" "0" "$(echo "$LIST" | jget 'o.items.filter(i=>i.type==="folder").length')"
+
+echo "===== 7b. 图床（上传 / 公开直链 / 转存 / 删除） ====="
+# 生成真实图片样本，无需 PIL / ImageMagick
+node - "$TMP" <<'NODE'
+const fs = require('node:fs');
+const { deflateSync } = require('node:zlib');
+const dir = process.argv[2];
+const CRC_TABLE = [...Array(256)].map((_, n) => {
+  let c = n;
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c >>> 0;
+});
+const crc32 = (buf) => {
+  let c = 0xffffffff;
+  for (const b of buf) c = CRC_TABLE[(c ^ b) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+};
+function png(w, h) {
+  const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0);
+  ihdr.writeUInt32BE(h, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 2;
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length, 0);
+    const t = Buffer.from(type, 'ascii');
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(Buffer.concat([t, data])), 0);
+    return Buffer.concat([len, t, data, crc]);
+  };
+  const rows = [...Array(h)].map(() => Buffer.concat([Buffer.from([0]), Buffer.alloc(w * 3, 0xcc)]));
+  return Buffer.concat([sig, chunk('IHDR', ihdr), chunk('IDAT', deflateSync(Buffer.concat(rows))), chunk('IEND', Buffer.alloc(0))]);
+}
+function gif(w, h) {
+  const parts = [Buffer.from('GIF89a', 'ascii')];
+  const lsd = Buffer.alloc(7);
+  lsd.writeUInt16LE(w, 0);
+  lsd.writeUInt16LE(h, 2);
+  lsd[4] = 0x80;
+  parts.push(lsd, Buffer.from([0xff, 0xff, 0xff, 0x00, 0x00, 0x00]), Buffer.from([0x2c]));
+  const desc = Buffer.alloc(8);
+  desc.writeUInt16LE(0, 0);
+  desc.writeUInt16LE(0, 2);
+  desc.writeUInt16LE(w, 4);
+  desc.writeUInt16LE(h, 6);
+  parts.push(desc, Buffer.from([0x07]));
+  const bits = [];
+  for (const code of [4, ...[...Array(w * h)].map(() => 0), 5]) {
+    for (let i = 0; i < 3; i++) bits.push((code >> i) & 1);
+  }
+  const data = Buffer.alloc(Math.ceil(bits.length / 8));
+  bits.forEach((b, i) => {
+    if (b) data[i >> 3] |= 0x80 >> (i & 7);
+  });
+  parts.push(Buffer.from([2, data.length]), data, Buffer.from([0x00, 0x3b]));
+  return Buffer.concat(parts);
+}
+function bmp(w, h) {
+  const rowSize = Math.ceil((w * 3) / 4) * 4;
+  const pixels = Buffer.alloc(rowSize * h, 0xcc);
+  const header = Buffer.alloc(14);
+  header.write('BM', 0, 'ascii');
+  header.writeUInt32LE(54 + pixels.length, 2);
+  header.writeUInt32LE(54, 10);
+  const info = Buffer.alloc(40);
+  info.writeUInt32LE(40, 0);
+  info.writeInt32LE(w, 4);
+  info.writeInt32LE(h, 8);
+  info.writeUInt16LE(1, 12);
+  info.writeUInt16LE(24, 14);
+  info.writeUInt32LE(pixels.length, 20);
+  return Buffer.concat([header, info, pixels]);
+}
+function webp(w, h) {
+  const payload = Buffer.alloc(5);
+  payload[0] = 0x2f;
+  payload.writeUIntLE(((w - 1) & 0x3fff) | (((h - 1) & 0x3fff) << 14), 1, 4);
+  const vp8l = Buffer.concat([Buffer.from('VP8L', 'ascii'), (() => { const s = Buffer.alloc(4); s.writeUInt32LE(payload.length, 0); return s; })(), payload]);
+  const size = Buffer.alloc(4);
+  size.writeUInt32LE(4 + vp8l.length, 0);
+  return Buffer.concat([Buffer.from('RIFF', 'ascii'), size, Buffer.from('WEBP', 'ascii'), vp8l]);
+}
+fs.writeFileSync(`${dir}/pic.png`, png(320, 180));
+fs.writeFileSync(`${dir}/pic.gif`, gif(48, 24));
+fs.writeFileSync(`${dir}/pic.bmp`, bmp(64, 32));
+fs.writeFileSync(`${dir}/pic.webp`, webp(33, 17));
+fs.writeFileSync(`${dir}/evil.png`, Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.from('<script>alert(1)</script>')]));
+fs.writeFileSync(`${dir}/evil.html`, Buffer.from('<!doctype html><script>alert(1)</script>'));
+fs.writeFileSync(`${dir}/huge.png`, Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(11 * 1024 * 1024)]));
+NODE
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "$IP" -F "file=@$TMP/pic.png" "$BASE/api/imagebed/upload")
+chk "未登录上传 401" 401 "$code"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H "$IP" -F "file=@$TMP/evil.png" "$BASE/api/imagebed/upload")
+chk "伪造的 png 被拒 400" 400 "$code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H "$IP" -F "file=@$TMP/evil.html" "$BASE/api/imagebed/upload")
+chk "HTML 文件被拒 400" 400 "$code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H "$IP" -X POST -F "notfile=@$TMP/pic.png" "$BASE/api/imagebed/upload")
+chk "缺少文件字段 400" 400 "$code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H "$IP" -F "file=@$TMP/huge.png" "$BASE/api/imagebed/upload")
+chk "超过 10MB 被拒 413" 413 "$code"
+
+UP=$(curl -s -b "$JAR" -H "$IP" -F "file=@$TMP/pic.png" "$BASE/api/imagebed/upload")
+IMGID=$(echo "$UP" | jget 'o.item.id')
+IMGURL=$(echo "$UP" | jget 'o.item.url')
+chk "上传返回公开直链" "yes" "$(echo "$IMGURL" | grep -qE "^/i/${IMGID}\.png$" && echo yes || echo no)"
+chk "解析 PNG 宽 320" "320" "$(echo "$UP" | jget 'o.item.width')"
+chk "解析 PNG 高 180" "180" "$(echo "$UP" | jget 'o.item.height')"
+chk "记录字节大小" "$(stat -c%s "$TMP/pic.png")" "$(echo "$UP" | jget 'o.item.size')"
+
+for ext in gif bmp webp; do
+  curl -s -b "$JAR" -H "$IP" -F "file=@$TMP/pic.$ext" "$BASE/api/imagebed/upload" > /dev/null
+done
+
+# 公开直链：无 Cookie 直接可访问，且带缓存与 nosniff 头
+H=$(curl -s -D - -o "$TMP/dl.png" "$BASE$IMGURL")
+chk "公开直链 200（无需登录）" "yes" "$(echo "$H" | head -1 | grep -q 200 && echo yes || echo no)"
+chk "Content-Type 为 image/png" "yes" "$(echo "$H" | grep -qi 'content-type: image/png' && echo yes || echo no)"
+chk "长缓存头" "yes" "$(echo "$H" | grep -qi 'cache-control: public, max-age=31536000, immutable' && echo yes || echo no)"
+chk "nosniff 头" "yes" "$(echo "$H" | grep -qi 'x-content-type-options: nosniff' && echo yes || echo no)"
+chk "直链内容与源文件一致" "$(sha256sum "$TMP/pic.png" | cut -d' ' -f1)" "$(sha256sum "$TMP/dl.png" | cut -d' ' -f1)"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/i/$IMGID")
+chk "缺扩展名的直链 404" 404 "$code"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/i/not-a-uuid.png")
+chk "非法 id 的直链 404" 404 "$code"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/i/files/$IMGID.png")
+chk "带路径前缀的直链 404" 404 "$code"
+
+LIST=$(curl -s -b "$JAR" -H "$IP" "$BASE/api/imagebed/list")
+chk "图床列表 4 张" "4" "$(echo "$LIST" | jget 'o.items.length')"
+chk "统计总数为 4" "4" "$(echo "$LIST" | jget 'o.total')"
+chk "webp 归一化扩展名" "webp" "$(echo "$LIST" | jget 'o.items.some(i=>i.ext==="webp") ? "webp" : "none"')"
+chk "列表带公开直链" "yes" "$(echo "$LIST" | jget 'o.items.every(i=>/^\/i\/[0-9a-f-]{36}\.(png|gif|bmp|webp)$/.test(i.url)) ? "yes" : "no"')"
+
+# cursor 键集分页：limit=1 逐页翻完，应不重不漏
+SEEN=""
+CUR=""
+for _ in $(seq 1 10); do
+  RESP=$(curl -s -b "$JAR" -H "$IP" "$BASE/api/imagebed/list?limit=1${CUR:+&cursor=$CUR}")
+  ID=$(echo "$RESP" | jget 'o.items.length ? o.items[0].id : ""')
+  CUR=$(echo "$RESP" | jget 'o.nextCursor || ""')
+  [ -n "$ID" ] || break
+  SEEN="$SEEN $ID"
+done
+chk "cursor 分页遍历完整" "4" "$(echo "$SEEN" | wc -w)"
+chk "cursor 分页无重复" "4" "$(echo "$SEEN" | tr ' ' '\n' | grep -c .)"
+
+# 上传要计入限流（login_failures 中 imgup: 前缀的行数）
+IMGROWS=$(npx wrangler d1 execute DB --local --json --command "SELECT COUNT(*) AS c FROM login_failures WHERE ip LIKE 'imgup:%'" 2>/dev/null | jget 'o[0].results[0].c')
+chk "上传计入限流计数" "yes" "$([ "${IMGROWS:-0}" -ge 4 ] && echo yes || echo no)"
+
+# 网盘图片转存到图床：两份 R2 对象互不影响
+PUP=$(curl -s -b "$JAR" -H "$IP" -H 'Content-Type: application/json' -d "{\"name\":\"drive-pic.png\",\"size\":$(stat -c%s "$TMP/pic.png"),\"mime\":null,\"parentId\":null}" -X POST "$BASE/api/upload/init")
+PUPID=$(echo "$PUP" | jget 'o.uploadId')
+PETAG=$(curl -s -b "$JAR" -H "$IP" -X PUT --data-binary "@$TMP/pic.png" "$BASE/api/upload/$PUPID/part/1" | jget 'o.etag')
+DONE=$(curl -s -b "$JAR" -H "$IP" -H 'Content-Type: application/json' -d "{\"parts\":[{\"partNumber\":1,\"etag\":\"$PETAG\"}]}" -X POST "$BASE/api/upload/$PUPID/complete")
+DRIVEPIC=$(echo "$DONE" | jget 'o.item.id')
+chk "网盘内图片上传完成" "drive-pic.png" "$(echo "$DONE" | jget 'o.item.name')"
+
+IB=$(curl -s -b "$JAR" -H "$IP" -H 'Content-Type: application/json' -d "{\"fileId\":\"$DRIVEPIC\"}" -X POST "$BASE/api/imagebed/from-drive")
+IBURL=$(echo "$IB" | jget 'o.item.url')
+chk "网盘图片转存图床" "yes" "$(echo "$IBURL" | grep -qE '^/i/[0-9a-f-]{36}\.png$' && echo yes || echo no)"
+curl -s "$BASE$IBURL" -o "$TMP/ib.png"
+chk "转存内容与源一致" "$(sha256sum "$TMP/pic.png" | cut -d' ' -f1)" "$(sha256sum "$TMP/ib.png" | cut -d' ' -f1)"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H "$IP" -X DELETE "$BASE/api/imagebed/$IMGID")
+chk "删除图片 200" 200 "$code"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE$IMGURL")
+chk "删除后直链失效 404" 404 "$code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H "$IP" -X DELETE "$BASE/api/imagebed/$IMGID")
+chk "重复删除 404" 404 "$code"
+
+me=$(curl -s -b "$JAR" -H "$IP" "$BASE/api/me")
+chk "me 统计图床数量" "4" "$(echo "$me" | jget 'o.imageCount')"
+chk "me 统计图床占用" "yes" "$([ "$(echo "$me" | jget 'o.imageUsage')" -gt 0 ] && echo yes || echo no)"
 
 echo "===== 8. 限流与登出 ====="
 # 清空限流计数后重发 6 次：每邮箱 5 次/15 分钟，第 6 次应触发 429

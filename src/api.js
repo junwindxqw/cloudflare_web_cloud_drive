@@ -582,6 +582,7 @@ async function changePassword(request, env, session) {
 
 async function me(env, session) {
   const row = await env.DB.prepare("SELECT COUNT(*) AS c, COALESCE(SUM(size),0) AS s FROM files WHERE type = 'file'").first();
+  const img = await env.DB.prepare('SELECT COUNT(*) AS c, COALESCE(SUM(size),0) AS s FROM images').first();
   const user = await env.DB.prepare('SELECT password_hash FROM users WHERE email = ?').bind(session?.email || '').first();
   return json({
     email: session?.email || null,
@@ -589,6 +590,8 @@ async function me(env, session) {
     hasPassword: !!(user && user.password_hash),
     fileCount: row?.c || 0,
     usage: row?.s || 0,
+    imageCount: img?.c || 0,
+    imageUsage: img?.s || 0,
   });
 }
 
@@ -683,6 +686,226 @@ async function handlePub(request, env, ctx, url, seg, method) {
   throw new HttpError(404, '接口不存在');
 }
 
+// ---------- 图床 ----------
+
+const IMAGEBED_MAX_SIZE = 10 * 1024 * 1024; // 单张图片 10 MB
+
+// 允许的图片格式：归一化扩展名 -> Content-Type。
+// 展示用的 Content-Type 只由本表决定，客户端声明的 MIME 一律不采信（配合 X-Content-Type-Options: nosniff）。
+const IMAGE_TYPES = {
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  avif: 'image/avif',
+  bmp: 'image/bmp',
+  ico: 'image/x-icon',
+};
+
+// 展示名清洗：只用于界面展示，不参与 R2 key（key 始终是 UUID）
+function sanitizeDisplayName(name) {
+  if (typeof name !== 'string') return '';
+  return name
+    .split(/[\\/]/)
+    .pop()
+    .replace(/[\u0000-\u001f]/g, '')
+    .trim()
+    .slice(0, 255);
+}
+
+function asciiAt(bytes, off, len) {
+  let s = '';
+  for (let i = 0; i < len; i++) s += String.fromCharCode(bytes[off + i]);
+  return s;
+}
+
+// 按文件头魔数判定真实格式，返回归一化扩展名（jpeg -> jpg）；无法识别返回 null
+function sniffImage(buf) {
+  const b = new Uint8Array(buf, 0, Math.min(buf.byteLength, 32));
+  if (b[0] === 0x89 && asciiAt(b, 1, 7) === 'PNG\r\n\x1a\n') return 'png';
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'jpg';
+  if (asciiAt(b, 0, 3) === 'GIF') return 'gif';
+  if (b[0] === 0x42 && b[1] === 0x4d) return 'bmp';
+  if (b[0] === 0x00 && b[1] === 0x00 && (b[2] === 0x01 || b[2] === 0x02)) return 'ico';
+  if (b.byteLength >= 12 && asciiAt(b, 0, 4) === 'RIFF' && asciiAt(b, 8, 4) === 'WEBP') return 'webp';
+  if (b.byteLength >= 12 && asciiAt(b, 4, 4) === 'ftyp') {
+    const brand = asciiAt(b, 8, 4);
+    if (brand === 'avif' || brand === 'avis') return 'avif';
+  }
+  return null;
+}
+
+// 解析图片像素尺寸，返回 [width, height]；无法解析的返回 [null, null]
+function probeImageSize(buf, ext) {
+  const b = new Uint8Array(buf);
+  const u16be = (o) => (b[o] << 8) | b[o + 1];
+  const u16le = (o) => (b[o] | (b[o + 1] << 8)) & 0xffff;
+  const u32be = (o) => ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0;
+  const u32le = (o) => (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0;
+  const u24le = (o) => (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16)) + 1;
+  try {
+    switch (ext) {
+      case 'png': // 89 'PNG' + IHDR 长度/类型 后即宽高（大端 4 字节）
+        return b.byteLength >= 24 ? [u32be(16), u32be(20)] : [null, null];
+      case 'gif':
+        return b.byteLength >= 10 ? [u16le(6), u16le(8)] : [null, null];
+      case 'bmp': // 'BM' + 14 字节文件头，宽高为小端（高度可能为负表示自底向上）
+        return b.byteLength >= 26 ? [u32le(18), Math.abs(u32le(22) | 0)] : [null, null];
+      case 'jpg': {
+        if (b.byteLength < 4 || b[0] !== 0xff || b[1] !== 0xd8) return [null, null];
+        let o = 2;
+        while (o + 9 < b.byteLength) {
+          if (b[o] !== 0xff) {
+            o++;
+            continue;
+          }
+          const marker = b[o + 1];
+          if (marker === 0xff) {
+            o++;
+            continue;
+          }
+          if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd9)) {
+            o += 2; // 无载荷标记
+            continue;
+          }
+          const len = u16be(o + 2);
+          if (len < 2) return [null, null];
+          // SOF0-SOF15（排除 C4=DHT、C8=JPG、CC=DAC 三种非尺寸标记）
+          if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+            return [u16be(o + 7), u16be(o + 5)];
+          }
+          o += 2 + len;
+        }
+        return [null, null];
+      }
+      case 'webp': {
+        if (b.byteLength < 18) return [null, null];
+        const fourCC = asciiAt(b, 12, 4);
+        if (fourCC === 'VP8X') return [u24le(24), u24le(27)]; // 扩展格式：24 位宽/高（-1 编码）
+        if (fourCC === 'VP8 ' && b.byteLength >= 30 && b[23] === 0x9d && b[24] === 0x01 && b[25] === 0x2a) {
+          return [(b[26] | (b[27] << 8)) & 0x3fff, (b[28] | (b[29] << 8)) & 0x3fff]; // 有损关键帧
+        }
+        if (fourCC === 'VP8L' && b.byteLength >= 25 && b[20] === 0x2f) {
+          const bits = u32le(21);
+          return [(bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1]; // 无损：14 位宽/高（-1 编码）
+        }
+        return [null, null];
+      }
+      default:
+        return [null, null];
+    }
+  } catch {
+    return [null, null];
+  }
+}
+
+// 写入图片（魔数嗅探 -> R2 -> D1），返回图床条目
+async function storeImage(env, bytes, displayName) {
+  const ext = sniffImage(bytes);
+  if (!ext) throw new HttpError(400, '仅支持 JPG / PNG / GIF / WebP / AVIF / BMP / ICO 格式的图片');
+  if (bytes.byteLength === 0) throw new HttpError(400, '图片内容为空');
+  if (bytes.byteLength > IMAGEBED_MAX_SIZE) {
+    throw new HttpError(413, `单张图片不能超过 ${IMAGEBED_MAX_SIZE / 1024 / 1024} MB`);
+  }
+  const [width, height] = probeImageSize(bytes, ext);
+  const id = crypto.randomUUID();
+  await env.BUCKET.put(`images/${id}.${ext}`, bytes, { httpMetadata: { contentType: IMAGE_TYPES[ext] } });
+  const name = sanitizeDisplayName(displayName) || `image.${ext}`;
+  await env.DB.prepare('INSERT INTO images (id, name, ext, size, width, height, created_at) VALUES (?,?,?,?,?,?,?)')
+    .bind(id, name, ext, bytes.byteLength, width, height, Date.now())
+    .run();
+  return { id, name, ext, size: bytes.byteLength, width, height, url: `/i/${id}.${ext}` };
+}
+
+async function imagebedUpload(request, env, ctx, session) {
+  const email = session?.email || 'unknown';
+  if (!(await auth.checkRateLimit(env, `imgup:${email}`, 15 * 60 * 1000, 200))) {
+    throw new HttpError(429, '上传过于频繁，请 15 分钟后再试');
+  }
+  ctx.waitUntil(auth.recordFailure(env, `imgup:${email}`));
+  let form;
+  try {
+    form = await request.formData();
+  } catch {
+    throw new HttpError(400, '请求格式不正确');
+  }
+  const file = form.get('file');
+  if (!file || typeof file.arrayBuffer !== 'function') throw new HttpError(400, '缺少图片文件');
+  const bytes = await file.arrayBuffer();
+  const item = await storeImage(env, bytes, typeof file.name === 'string' ? file.name : '');
+  return json({ item });
+}
+
+// 把网盘中已有的图片文件复制一份到图床（R2 读出后重新写入，互不影响）
+async function imagebedFromDrive(request, env) {
+  const body = await readJson(request);
+  const row = await env.DB.prepare("SELECT id, name, r2_key FROM files WHERE id = ? AND type = 'file'").bind(String(body.fileId || '')).first();
+  if (!row || !row.r2_key) throw new HttpError(404, '文件不存在');
+  const obj = await env.BUCKET.get(row.r2_key);
+  if (!obj) throw new HttpError(404, '文件内容不存在');
+  const item = await storeImage(env, await obj.arrayBuffer(), row.name);
+  return json({ item });
+}
+
+// 图集列表：按 (created_at, id) 键集分页，cursor 形如 "<created_at>:<id>"
+const CURSOR_RE = /^(\d+):([0-9a-zA-Z-]+)$/;
+
+async function imagebedList(env, url) {
+  const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit')) || 60));
+  const cursor = (url.searchParams.get('cursor') || '').match(CURSOR_RE);
+  const binds = [];
+  let where = '';
+  if (cursor) {
+    where = ' WHERE created_at < ? OR (created_at = ? AND id < ?)';
+    binds.push(Number(cursor[1]), Number(cursor[1]), cursor[2]);
+  }
+  const { results } = await env.DB.prepare(
+    `SELECT id, name, ext, size, width, height, created_at FROM images${where}
+     ORDER BY created_at DESC, id DESC LIMIT ?`
+  )
+    .bind(...binds, limit)
+    .all();
+  const stats = await env.DB.prepare('SELECT COUNT(*) AS c, COALESCE(SUM(size),0) AS s FROM images').first();
+  const items = results.map((r) => ({ ...r, url: `/i/${r.id}.${r.ext}` }));
+  const last = results[results.length - 1];
+  return json({
+    items,
+    total: stats?.c || 0,
+    totalSize: stats?.s || 0,
+    nextCursor: results.length === limit && last ? `${last.created_at}:${last.id}` : null,
+  });
+}
+
+async function imagebedDelete(env, id) {
+  const row = await env.DB.prepare('SELECT id, ext FROM images WHERE id = ?').bind(id).first();
+  if (!row) throw new HttpError(404, '图片不存在');
+  await env.DB.prepare('DELETE FROM images WHERE id = ?').bind(id).run();
+  await env.BUCKET.delete(`images/${row.id}.${row.ext}`);
+  return json({ ok: true });
+}
+
+// 公开直链 /i/<id>.<ext>（无需登录，任何人可访问，供外站以 <img> 嵌入）
+const IMAGE_KEY_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.([a-z0-9]{1,8})$/i;
+
+export async function handleImagebedRaw(env, idParam) {
+  const m = (idParam || '').match(IMAGE_KEY_RE);
+  if (!m) throw new HttpError(404, '图片不存在');
+  const ext = m[2].toLowerCase();
+  const obj = await env.BUCKET.get(`images/${m[1]}.${ext}`);
+  if (!obj) throw new HttpError(404, '图片不存在');
+  // URL 不可变（id 不变），可长期强缓存；删除后自然 404
+  const headers = {
+    'Content-Type': IMAGE_TYPES[ext] || 'application/octet-stream',
+    'Content-Length': String(obj.size),
+    'ETag': obj.httpEtag,
+    'Cache-Control': 'public, max-age=31536000, immutable',
+    'X-Content-Type-Options': 'nosniff',
+    'Content-Security-Policy': 'sandbox',
+  };
+  return new Response(obj.body, { status: 200, headers });
+}
+
 // ---------- 路由入口 ----------
 
 export async function handleApi(request, env, ctx) {
@@ -769,6 +992,13 @@ export async function handleApi(request, env, ctx) {
 
     if (seg[1] === 'file' && method === 'GET' && seg.length === 4) {
       if (seg[3] === 'raw' || seg[3] === 'download') return await serveFile(request, env, seg[2], seg[3]);
+    }
+
+    if (seg[1] === 'imagebed') {
+      if (seg[2] === 'upload' && method === 'POST' && seg.length === 3) return await imagebedUpload(request, env, ctx, session);
+      if (seg[2] === 'from-drive' && method === 'POST' && seg.length === 3) return await imagebedFromDrive(request, env);
+      if (seg[2] === 'list' && method === 'GET' && seg.length === 3) return await imagebedList(env, url);
+      if (method === 'DELETE' && seg.length === 3) return await imagebedDelete(env, seg[2]);
     }
 
     if (seg[1] === 'share' && method === 'POST' && seg.length === 2) return await createShare(request, env);

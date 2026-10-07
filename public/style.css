@@ -1243,6 +1243,216 @@ a {
   font-size: 15px;
 }
 
+/* ---------- 视图切换（网盘 / 图床） ---------- */
+.view-switch {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  flex: none;
+}
+.view-switch button {
+  border: none;
+  background: none;
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.view-switch button:hover {
+  color: var(--fg);
+}
+.view-switch button.active {
+  background: var(--card);
+  color: var(--primary);
+  box-shadow: var(--shadow);
+}
+[hidden] {
+  display: none !important;
+}
+
+/* ---------- 图床 ---------- */
+.ib-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.ib-stats {
+  font-size: 13px;
+  color: var(--muted);
+}
+.ib-auto {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ib-fmt {
+  width: auto;
+  padding: 7px 10px;
+  font-size: 13px;
+}
+.ib-drop {
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
+  padding: 34px 20px;
+  text-align: center;
+  cursor: pointer;
+  margin-bottom: 14px;
+  transition: border-color 0.15s, background 0.15s;
+}
+.ib-drop:hover,
+.ib-drop.over {
+  border-color: var(--primary);
+  background: var(--primary-weak);
+}
+.ib-drop svg {
+  width: 44px;
+  height: 44px;
+  fill: var(--muted);
+}
+.ib-drop-title {
+  margin: 8px 0 4px;
+  font-weight: 600;
+}
+.ib-drop .muted {
+  margin: 0;
+  font-size: 12.5px;
+}
+#ib-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.ib-task {
+  position: relative;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px 16px;
+  font-size: 13px;
+}
+.ib-task-name {
+  display: inline-block;
+  max-width: calc(100% - 150px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.ib-task .up-cancel {
+  float: right;
+  margin: 0 10px 0 0;
+}
+.ib-task-status {
+  float: right;
+  color: var(--muted);
+}
+.ib-task-status.ok {
+  color: #16a34a;
+}
+.ib-task-status.err {
+  color: var(--danger);
+}
+.ib-task .progress {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 7px;
+  height: 4px;
+}
+.ib-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+}
+.ib-card {
+  position: relative;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: var(--shadow);
+}
+.ib-card.selected {
+  outline: 2px solid var(--primary);
+}
+.ib-card .row-check {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+}
+.ib-thumb {
+  height: 132px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  cursor: zoom-in;
+  overflow: hidden;
+}
+.ib-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  display: block;
+}
+.ib-thumb.broken::after {
+  content: '加载失败';
+  color: var(--muted);
+  font-size: 12px;
+}
+.ib-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px 4px;
+}
+.ib-name {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ib-sub {
+  font-size: 12px;
+  color: var(--muted);
+}
+.ib-actions {
+  display: flex;
+  gap: 6px;
+  padding: 6px 10px 10px;
+}
+.ib-actions .btn {
+  flex: 1;
+  justify-content: center;
+  padding: 6px 0;
+  font-size: 12.5px;
+}
+.ib-actions .ib-del {
+  flex: none;
+  width: 34px;
+  color: var(--danger);
+}
+.ib-more {
+  text-align: center;
+  padding: 16px 0 48px;
+}
+
 /* ---------- 移动端适配 ---------- */
 @media (max-width: 768px) {
   .topbar {
@@ -1298,6 +1508,20 @@ a {
   }
   .toolbar {
     display: none;
+  }
+  .view-switch button {
+    padding: 6px 9px;
+    font-size: 13px;
+  }
+  .ib-drop {
+    padding: 24px 12px;
+  }
+  .ib-grid {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 8px;
+  }
+  .ib-thumb {
+    height: 108px;
   }
   .fab-wrap {
     display: flex;

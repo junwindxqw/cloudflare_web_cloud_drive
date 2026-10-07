@@ -4,6 +4,7 @@ import { api, apiUrl, fmtSize, fmtDate, iconFor, fileKind, escapeHtml, toast, op
 const $ = (sel, el = document) => el.querySelector(sel);
 
 const state = {
+  view: 'drive', // 'drive' 网盘 | 'imagebed' 图床
   folderId: null,
   path: [],
   items: [],
@@ -23,6 +24,7 @@ async function boot() {
   try {
     await refreshMe();
     renderMain();
+    if (location.hash.startsWith('#/imagebed')) switchView('imagebed', { push: false });
     const m = location.hash.match(/^#\/folder\/([\w-]+)$/);
     await loadDir(m ? m[1] : null, { push: false });
   } catch {
@@ -313,9 +315,11 @@ function renderAuthView(view) {
 async function enterApp() {
   await refreshMe();
   renderMain();
+  const wantImagebed = location.hash.startsWith('#/imagebed');
   const m = location.hash.match(/^#\/folder\/([\w-]+)$/);
   loadDir(m ? m[1] : null, { push: false });
   history.replaceState(null, '', location.pathname);
+  if (wantImagebed) switchView('imagebed', { push: true });
   if (state.usage && state.usage.hasPassword === false) {
     setTimeout(() => openChangePasswordDialog({ firstTime: true }), 600);
   }
@@ -368,7 +372,11 @@ function renderMain() {
   document.getElementById('app').innerHTML = `
     <header class="topbar">
       <div class="brand"><svg viewBox="0 0 24 24"><path d="M6 4h5l2 3h5a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"/></svg><span>JunDrive</span></div>
-      <div class="searchbox">
+      <nav class="view-switch" id="view-switch">
+        <button type="button" data-view="drive" class="active">🗂 网盘</button>
+        <button type="button" data-view="imagebed">🖼 图床</button>
+      </nav>
+      <div class="searchbox" id="searchbox">
         <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
         <input class="input" id="search-input" type="search" placeholder="搜索文件和文件夹" />
       </div>
@@ -377,21 +385,24 @@ function renderMain() {
     </header>
 
     <div class="subbar">
-      <div class="crumbs" id="crumbs"></div>
-      <div class="toolbar" id="toolbar">
-        <button class="btn" data-cmd="new-folder">📁 新建文件夹</button>
-        <button class="btn" data-cmd="upload-file">⬆ 上传文件</button>
-        <button class="btn" data-cmd="upload-folder">🗂 上传文件夹</button>
-        <span class="spacer"></span>
-        <button class="icon-btn" data-cmd="refresh" title="刷新">⟳</button>
-        <button class="icon-btn" data-cmd="toggle-view" title="切换视图"></button>
+      <div id="drive-sub">
+        <div class="crumbs" id="crumbs"></div>
+        <div class="toolbar" id="toolbar">
+          <button class="btn" data-cmd="new-folder">📁 新建文件夹</button>
+          <button class="btn" data-cmd="upload-file">⬆ 上传文件</button>
+          <button class="btn" data-cmd="upload-folder">🗂 上传文件夹</button>
+          <span class="spacer"></span>
+          <button class="icon-btn" data-cmd="refresh" title="刷新">⟳</button>
+          <button class="icon-btn" data-cmd="toggle-view" title="切换视图"></button>
+        </div>
+        <div id="batch-slot"></div>
       </div>
-      <div id="batch-slot"></div>
     </div>
 
     <main class="main" id="main">
       <div id="list-container"></div>
     </main>
+    <section class="main" id="imagebed-view" hidden></section>
 
     <div class="fab-wrap" id="fab-wrap">
       <button class="fab" id="fab" title="操作">+</button>
@@ -411,6 +422,9 @@ function renderMain() {
     <input type="file" id="dir-input" webkitdirectory multiple hidden />
   `;
 
+  $('#view-switch').querySelectorAll('[data-view]').forEach((b) =>
+    b.addEventListener('click', () => switchView(b.dataset.view))
+  );
   $('#toolbar [data-cmd="toggle-view"]').innerHTML = state.view === 'list' ? '▦' : '☰';
   $('#user-btn').addEventListener('click', (e) => showUserMenu(e.currentTarget));
   $('#fab').addEventListener('click', () => $('#fab-wrap').classList.toggle('open'));
@@ -455,10 +469,35 @@ function runCmd(cmd) {
   }
 }
 
+// 网盘 / 图床 两个视图切换（图床视图独占主区域，网盘的面包屑/工具栏/FAB 全部隐藏）
+function switchView(view, { push = true } = {}) {
+  if (state.view === view) return;
+  state.view = view;
+  if (push) {
+    history.pushState(null, '', view === 'imagebed' ? '#/imagebed' : state.folderId ? `#/folder/${state.folderId}` : '#/');
+  }
+  $('#main').hidden = view !== 'drive';
+  $('#imagebed-view').hidden = view !== 'imagebed';
+  $('#drive-sub').hidden = view !== 'drive';
+  $('#searchbox').hidden = view !== 'drive';
+  $('#fab-wrap').hidden = view !== 'drive';
+  $('#view-switch').querySelectorAll('[data-view]').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
+  if (view === 'imagebed') {
+    if (state.searchMode) clearSearch();
+    ibMount();
+  } else {
+    renderList();
+    renderBatchbar();
+  }
+}
+
 function onPopState() {
+  if (location.hash.startsWith('#/imagebed')) return switchView('imagebed', { push: false });
+  const wasImagebed = state.view === 'imagebed';
+  switchView('drive', { push: false });
   const m = location.hash.match(/^#\/folder\/([\w-]+)$/);
   const target = m ? m[1] : null;
-  if (target !== state.folderId) loadDir(target, { push: false });
+  if (target !== state.folderId || wasImagebed) loadDir(target, { push: false, silent: wasImagebed });
 }
 
 // ---------------- 目录 ----------------
@@ -737,10 +776,12 @@ function showMenu(html, anchor) {
 }
 
 function showItemMenu(it, anchor) {
+  const isImage = it.type === 'file' && fileKind(it) === 'image';
   const menu = showMenu(
     `<div class="menu-head">${escapeHtml(it.name)}</div>
      ${it.type === 'file' ? '<button data-act="preview">👁 预览</button>' : ''}
      ${it.type === 'file' ? '<button data-act="download">⬇ 下载</button>' : ''}
+     ${isImage ? '<button data-act="to-imagebed">🖼 上传到图床</button>' : ''}
      <button data-act="share">🔗 分享</button>
      <button data-act="rename">✏️ 重命名</button>
      <button data-act="move">📂 移动</button>
@@ -759,6 +800,7 @@ function showItemMenu(it, anchor) {
       a.download = '';
       a.click();
     }
+    if (act === 'to-imagebed') uploadToImagebed(it);
     if (act === 'share') openShareDialog(it);
     if (act === 'rename') renameItem(it);
     if (act === 'move') openMoveDialog([it]);
@@ -1457,6 +1499,10 @@ function setupPasteUpload() {
     }
     if (!files.length) return;
     e.preventDefault();
+    if (state.view === 'imagebed') {
+      ibHandleFiles(files);
+      return;
+    }
     if (state.searchMode) toast('粘贴上传会放入当前浏览的目录，请先退出搜索', 'err');
     else handleFiles(files);
   });
@@ -1474,6 +1520,7 @@ function setupDragDrop() {
   window.addEventListener('dragenter', (e) => {
     if (e.dataTransfer && [...e.dataTransfer.types].includes('Files')) {
       dragDepth++;
+      overlay.firstElementChild.textContent = state.view === 'imagebed' ? '松开鼠标上传图片到图床' : '松开鼠标上传到当前目录';
       overlay.style.display = 'flex';
     }
   });
@@ -1488,13 +1535,443 @@ function setupDragDrop() {
     e.preventDefault();
     dragDepth = 0;
     overlay.style.display = 'none';
-    if (e.dataTransfer && e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
+    if (e.dataTransfer && e.dataTransfer.files.length) {
+      if (state.view === 'imagebed') ibHandleFiles(e.dataTransfer.files);
+      else handleFiles(e.dataTransfer.files);
+    }
   });
 }
 
+// ---------------- 图床 ----------------
+
+const IB_MAX_SIZE = 10 * 1024 * 1024; // 与服务端一致
+const IB_PAGE = 60;
+const IB_CONCURRENT = 3;
+const IB_FORMAT_NAMES = { url: 'URL', md: 'Markdown', html: 'HTML', bbcode: 'BBCode' };
+
+const ibState = {
+  mounted: false,
+  items: [],
+  total: 0,
+  totalSize: 0,
+  nextCursor: null,
+  loading: false,
+  format: localStorage.getItem('jd.ib.format') || 'url',
+  autoCopy: localStorage.getItem('jd.ib.autocopy') !== '0',
+  selection: new Set(),
+  tasks: [],
+  seq: 0,
+};
+
+let ibActive = 0;
+
+function ibMount() {
+  if (!ibState.mounted) {
+    $('#imagebed-view').innerHTML = `
+      <div class="ib-head">
+        <span class="ib-stats" id="ib-stats"></span>
+        <span class="spacer"></span>
+        <label class="ib-auto"><input type="checkbox" id="ib-autocopy" ${ibState.autoCopy ? 'checked' : ''} /> 上传后自动复制</label>
+        <select class="input ib-fmt" id="ib-format" title="复制链接的格式">
+          ${Object.entries(IB_FORMAT_NAMES)
+            .map(([k, v]) => `<option value="${k}" ${k === ibState.format ? 'selected' : ''}>${v}</option>`)
+            .join('')}
+        </select>
+        <button class="icon-btn" id="ib-refresh" title="刷新">⟳</button>
+        <button class="btn btn-primary" id="ib-upload-btn">⬆ 上传图片</button>
+      </div>
+      <div class="ib-drop" id="ib-drop">
+        <svg viewBox="0 0 24 24"><path d="M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z" fill-opacity=".35"/><circle cx="8.5" cy="9.5" r="1.8"/><path d="M5 17l4.5-5 3 3.4L15 12l4 5z"/></svg>
+        <p class="ib-drop-title">点击、拖拽或 Ctrl+V 粘贴上传图片</p>
+        <p class="muted">单张 ≤ ${IB_MAX_SIZE / 1024 / 1024} MB · JPG / PNG / GIF / WebP / AVIF / BMP / ICO</p>
+      </div>
+      <div id="ib-tasks"></div>
+      <div id="ib-batch"></div>
+      <div class="ib-grid" id="ib-grid"><div class="boot-loading">加载中…</div></div>
+      <div class="ib-more" id="ib-more"></div>
+      <input type="file" id="ib-file-input" accept="image/*" multiple hidden />`;
+
+    $('#ib-upload-btn').addEventListener('click', () => $('#ib-file-input').click());
+    $('#ib-drop').addEventListener('click', () => $('#ib-file-input').click());
+    $('#ib-file-input').addEventListener('change', (e) => {
+      ibHandleFiles(e.target.files);
+      e.target.value = '';
+    });
+    $('#ib-refresh').addEventListener('click', () => ibLoad(true));
+    $('#ib-format').addEventListener('change', (e) => {
+      ibState.format = e.target.value;
+      localStorage.setItem('jd.ib.format', ibState.format);
+      toast(`复制格式：${IB_FORMAT_NAMES[ibState.format]}`);
+    });
+    $('#ib-autocopy').addEventListener('change', (e) => {
+      ibState.autoCopy = e.target.checked;
+      localStorage.setItem('jd.ib.autocopy', ibState.autoCopy ? '1' : '0');
+    });
+    const zone = $('#ib-drop');
+    zone.addEventListener('dragenter', (e) => {
+      e.preventDefault();
+      zone.classList.add('over');
+    });
+    zone.addEventListener('dragover', (e) => e.preventDefault());
+    zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+    ibState.mounted = true;
+  }
+  ibLoad(true);
+}
+
+async function ibLoad(reset = false) {
+  if (ibState.loading) return;
+  ibState.loading = true;
+  renderIbMore();
+  try {
+    const cursor = reset ? '' : ibState.nextCursor ? `?cursor=${encodeURIComponent(ibState.nextCursor)}` : '';
+    const data = await api(`/api/imagebed/list${cursor}`);
+    if (reset) {
+      ibState.items = [];
+      ibState.selection.clear();
+    }
+    ibState.items.push(...data.items);
+    ibState.total = data.total;
+    ibState.totalSize = data.totalSize;
+    ibState.nextCursor = data.nextCursor;
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+  ibState.loading = false;
+  renderIbStats();
+  renderIbList();
+  renderIbMore();
+  renderIbBatch();
+}
+
+function renderIbStats() {
+  const el = $('#ib-stats');
+  if (el) el.textContent = `${ibState.total} 张图片 · 共 ${fmtSize(ibState.totalSize)}`;
+}
+
+function renderIbList() {
+  const box = $('#ib-grid');
+  if (!box) return;
+  if (!ibState.items.length) {
+    box.innerHTML = `
+      <div class="empty">
+        <svg viewBox="0 0 24 24"><path d="M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z" fill-opacity=".35"/><circle cx="8.5" cy="9.5" r="1.8"/><path d="M5 17l4.5-5 3 3.4L15 12l4 5z"/></svg>
+        <p><b>图床还是空的</b></p>
+        <p>上传图片即可获得可直接外链的公开地址</p>
+      </div>`;
+    return;
+  }
+  box.innerHTML = ibState.items.map(ibCardHtml).join('');
+  box.querySelectorAll('img.ib-img').forEach((img) =>
+    img.addEventListener('error', () => img.closest('.ib-thumb').classList.add('broken'), { once: true })
+  );
+  box.querySelectorAll('[data-ib-check]').forEach((c) =>
+    c.addEventListener('change', () => {
+      if (c.checked) ibState.selection.add(c.dataset.ibCheck);
+      else ibState.selection.delete(c.dataset.ibCheck);
+      c.closest('.ib-card').classList.toggle('selected', c.checked);
+      renderIbBatch();
+    })
+  );
+  box.querySelectorAll('[data-ib-copy]').forEach((b) => b.addEventListener('click', () => ibCopy([b.dataset.ibCopy])));
+  box.querySelectorAll('[data-ib-open]').forEach((b) =>
+    b.addEventListener('click', () => window.open(b.dataset.ibOpen, '_blank', 'noopener'))
+  );
+  box.querySelectorAll('[data-ib-del]').forEach((b) => b.addEventListener('click', () => ibDelete([b.dataset.ibDel])));
+}
+
+function ibCardHtml(it) {
+  const dim = it.width && it.height ? `${it.width}×${it.height} · ` : '';
+  return `
+    <div class="ib-card ${ibState.selection.has(it.id) ? 'selected' : ''}">
+      <input type="checkbox" class="row-check" data-ib-check="${it.id}" ${ibState.selection.has(it.id) ? 'checked' : ''} />
+      <div class="ib-thumb" data-ib-open="${escapeHtml(it.url)}" title="点击查看原图">
+        <img class="ib-img" loading="lazy" src="${escapeHtml(it.url)}" alt="${escapeHtml(it.name)}" />
+      </div>
+      <div class="ib-meta">
+        <span class="ib-name" title="${escapeHtml(it.name)}">${escapeHtml(it.name)}</span>
+        <span class="ib-sub">${dim}${fmtSize(it.size)} · ${fmtDate(it.created_at)}</span>
+      </div>
+      <div class="ib-actions">
+        <button class="btn" data-ib-copy="${it.id}" title="复制${IB_FORMAT_NAMES[ibState.format]}链接">⧉</button>
+        <button class="btn ib-del" data-ib-del="${it.id}" title="删除">✕</button>
+      </div>
+    </div>`;
+}
+
+function renderIbMore() {
+  const box = $('#ib-more');
+  if (!box) return;
+  box.innerHTML = ibState.loading
+    ? '<div class="boot-loading">加载中…</div>'
+    : ibState.nextCursor
+      ? '<button class="btn" id="ib-load-more">加载更多</button>'
+      : ibState.items.length
+        ? '<span class="muted">— 没有更多了 —</span>'
+        : '';
+  $('#ib-load-more')?.addEventListener('click', () => ibLoad(false));
+}
+
+// 按当前格式生成链接文本：URL / Markdown / HTML / BBCode
+function ibLinkText(it) {
+  const url = `${location.origin}${it.url}`;
+  const alt = it.name.replace(/["'<>[\]]/g, '');
+  if (ibState.format === 'md') return `![${alt}](${url})`;
+  if (ibState.format === 'html') return `<img src="${url}" alt="${alt}" />`;
+  if (ibState.format === 'bbcode') return `[img]${url}[/img]`;
+  return url;
+}
+
+async function ibCopy(ids) {
+  const items = ibState.items.filter((i) => ids.includes(i.id));
+  if (!items.length) return;
+  try {
+    await copyText(items.map(ibLinkText).join('\n'));
+    toast(items.length > 1 ? `已复制 ${items.length} 条链接` : '链接已复制');
+  } catch {
+    toast('复制失败，请手动复制', 'err');
+  }
+}
+
+async function ibDelete(ids) {
+  const items = ibState.items.filter((i) => ids.includes(i.id));
+  if (!items.length) return;
+  const ok = await confirmDialog(
+    '删除确认',
+    items.length > 1
+      ? `确定删除选中的 ${items.length} 张图片吗？直链将立即失效，此操作不可恢复。`
+      : `确定删除「${items[0].name}」吗？直链将立即失效，此操作不可恢复。`
+  );
+  if (!ok) return;
+  let fail = 0;
+  for (const it of items) {
+    try {
+      await api(`/api/imagebed/${it.id}`, { method: 'DELETE' });
+      ibState.items = ibState.items.filter((x) => x.id !== it.id);
+      ibState.selection.delete(it.id);
+      ibState.total = Math.max(0, ibState.total - 1);
+      ibState.totalSize = Math.max(0, ibState.totalSize - it.size);
+    } catch {
+      fail++;
+    }
+  }
+  toast(fail ? `有 ${fail} 张删除失败` : '删除完成', fail ? 'err' : 'info');
+  renderIbStats();
+  renderIbList();
+  renderIbBatch();
+  refreshMe().then(updateUsageText).catch(() => {});
+}
+
+function renderIbBatch() {
+  const slot = $('#ib-batch');
+  if (!slot) return;
+  if (!ibState.selection.size) {
+    slot.innerHTML = '';
+    return;
+  }
+  const loaded = ibState.items.filter((i) => ibState.selection.has(i.id));
+  slot.innerHTML = `
+    <div class="batchbar">
+      <span class="count">已选 ${loaded.length} 张</span>
+      <button class="btn" data-ib-batch="copy">复制链接</button>
+      <button class="btn btn-danger-weak" data-ib-batch="delete">删除</button>
+      <button class="btn" data-ib-batch="all">全选</button>
+      <button class="btn" data-ib-batch="none">取消</button>
+    </div>`;
+  slot.querySelectorAll('[data-ib-batch]').forEach((b) => b.addEventListener('click', () => ibBatch(b.dataset.ibBatch)));
+}
+
+function ibBatch(action) {
+  if (action === 'all') {
+    ibState.items.forEach((i) => ibState.selection.add(i.id));
+    return renderIbList(), renderIbBatch();
+  }
+  if (action === 'none') {
+    ibState.selection.clear();
+    return renderIbList(), renderIbBatch();
+  }
+  if (action === 'copy') return ibCopy(ibState.items.filter((i) => ibState.selection.has(i.id)).map((i) => i.id));
+  if (action === 'delete') return ibDelete(ibState.items.filter((i) => ibState.selection.has(i.id)).map((i) => i.id));
+}
+
+// 上传：一批文件作为一个批次，全部结束后按“上传后自动复制”统一复制链接
+function ibHandleFiles(fileList) {
+  const files = [...fileList];
+  if (!files.length) return;
+  const batch = { total: 0, settled: 0, links: [], tasks: [] };
+  for (const f of files) {
+    if (f.size > IB_MAX_SIZE) {
+      toast(`「${f.name}」超过 ${IB_MAX_SIZE / 1024 / 1024}MB 上限，已跳过`, 'err', 8000);
+      continue;
+    }
+    const task = { seq: ++ibState.seq, file: f, loaded: 0, status: '等待中', err: null, xhr: null, batch };
+    ibState.tasks.push(task);
+    batch.tasks.push(task);
+    batch.total++;
+  }
+  if (!batch.total) return;
+  toast(`开始上传 ${batch.total} 张图片`);
+  renderIbTasks();
+  ibPump();
+}
+
+function ibPump() {
+  while (ibActive < IB_CONCURRENT) {
+    const task = ibState.tasks.find((t) => t.status === '等待中');
+    if (!task) return;
+    task.status = '上传中';
+    ibActive++;
+    ibRunTask(task).finally(() => {
+      ibActive--;
+      ibPump();
+    });
+  }
+}
+
+function ibRunTask(task) {
+  return new Promise((resolve) => {
+    const fd = new FormData();
+    fd.append('file', task.file, task.file.name);
+    const xhr = new XMLHttpRequest();
+    task.xhr = xhr;
+    // 原生 XHR 以便拿到上传进度（fetch 无法观测 upload progress）
+    xhr.open('POST', apiUrl('/api/imagebed/upload'), true);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        task.loaded = e.loaded;
+        renderIbTasks();
+      }
+    };
+    xhr.onload = () => {
+      let data = null;
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch {}
+      if (xhr.status >= 200 && xhr.status < 300 && data && data.item) {
+        task.status = '完成';
+        task.loaded = task.file.size;
+        ibOnUploaded(task, data.item);
+      } else {
+        task.status = '失败';
+        task.err = (data && data.error) || `上传失败 (${xhr.status})`;
+        toast(`「${task.file.name}」${task.err}`, 'err', 6000);
+      }
+      ibSettle(task);
+      renderIbTasks();
+      resolve();
+    };
+    xhr.onerror = () => {
+      task.status = '失败';
+      task.err = '网络错误，上传中断';
+      ibSettle(task);
+      renderIbTasks();
+      resolve();
+    };
+    xhr.onabort = () => {
+      task.status = '已取消';
+      ibSettle(task);
+      renderIbTasks();
+      resolve();
+    };
+    xhr.send(fd);
+    renderIbTasks();
+  });
+}
+
+function ibOnUploaded(task, item) {
+  ibState.items.unshift(item);
+  ibState.total += 1;
+  ibState.totalSize += item.size;
+  task.batch.links.push(ibLinkText(item));
+  renderIbStats();
+  renderIbList();
+  renderIbBatch();
+  refreshMe().then(updateUsageText).catch(() => {});
+}
+
+function ibSettle(task) {
+  const b = task.batch;
+  b.settled++;
+  if (b.settled < b.total) return;
+  if (ibState.autoCopy && b.links.length) {
+    copyText(b.links.join('\n'))
+      .then(() => toast(`上传完成，已复制 ${b.links.length} 条链接`, 'ok', 5000))
+      .catch(() => toast('上传完成，但自动复制失败，请手动复制', 'err'));
+  } else if (b.links.length) {
+    toast(`上传完成 ${b.links.length} 张`, 'ok', 5000);
+  }
+  // 任务行 8 秒后自动清除
+  setTimeout(() => {
+    for (const t of b.tasks) {
+      const i = ibState.tasks.indexOf(t);
+      if (i >= 0) ibState.tasks.splice(i, 1);
+    }
+    renderIbTasks();
+  }, 8000);
+}
+
+function renderIbTasks() {
+  const box = $('#ib-tasks');
+  if (!box) return;
+  const done = (t) => ['完成', '失败', '已取消'].includes(t.status);
+  box.innerHTML = [...ibState.tasks]
+    .reverse()
+    .slice(0, 20)
+    .map((t) => {
+      const pct = t.file.size ? Math.min(100, Math.round((t.loaded / t.file.size) * 100)) : 100;
+      const cls = t.status === '失败' ? 'err' : t.status === '完成' ? 'ok' : '';
+      const text =
+        t.status === '上传中'
+          ? `${pct}%`
+          : t.status === '完成'
+            ? '完成 ✓'
+            : t.status === '失败'
+              ? `失败：${t.err}`
+              : t.status;
+      return `
+      <div class="ib-task">
+        <span class="ib-task-name" title="${escapeHtml(t.file.name)}">${escapeHtml(t.file.name)}</span>
+        ${done(t) ? '' : `<button class="up-cancel" data-ib-cancel="${t.seq}" title="取消">✕</button>`}
+        <span class="ib-task-status ${cls}">${text}</span>
+        <div class="progress"><div style="width:${t.status === '完成' ? 100 : pct}%"></div></div>
+      </div>`;
+    })
+    .join('');
+  box.querySelectorAll('[data-ib-cancel]').forEach((b) =>
+    b.addEventListener('click', () => {
+      const t = ibState.tasks.find((x) => x.seq === Number(b.dataset.ibCancel));
+      if (!t) return;
+      if (t.xhr) t.xhr.abort();
+      else {
+        t.status = '已取消';
+        renderIbTasks();
+      }
+    })
+  );
+}
+
+// 网盘图片 -> 图床：服务端读出 R2 对象后重新写入，两份数据互不影响
+async function uploadToImagebed(it) {
+  try {
+    const { item } = await api('/api/imagebed/from-drive', { method: 'POST', body: { fileId: it.id } });
+    const link = `${location.origin}${item.url}`;
+    const copied = await copyText(link).then(() => true).catch(() => false);
+    toast(copied ? `已上传到图床，链接已复制：${link}` : `已上传到图床：${link}`, 'ok', 10000);
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+}
+
 setupPasteUpload();
-// 未登录时直接访问 #/login、#/register、#/forgot 也能切换到对应视图
+// 未登录时直接访问 #/login、#/register、#/forgot 也能切换到对应视图；已登录时 #/imagebed 直达图床
 window.addEventListener('hashchange', () => {
   if (AUTH_HASH[location.hash] && !document.querySelector('.topbar')) renderAuth(AUTH_HASH[location.hash]);
+  else if (document.querySelector('.topbar')) {
+    if (location.hash.startsWith('#/imagebed')) switchView('imagebed', { push: false });
+    else if (state.view === 'imagebed') {
+      switchView('drive', { push: false });
+      loadDir(state.folderId, { push: false, silent: true });
+    }
+  }
 });
 boot();
