@@ -9,7 +9,12 @@ export default {
         return await handleApi(request, env, ctx);
       }
       if (url.pathname.startsWith('/i/')) {
-        return await handleImagebedRaw(env, decodeURIComponent(url.pathname.slice(3)));
+        // id 段只可能是 UUID.扩展名（纯 ASCII），decode 失败一律按“不存在”处理，避免 500
+        let idParam = url.pathname.slice(3);
+        try {
+          idParam = decodeURIComponent(idParam);
+        } catch {}
+        return await handleImagebedRaw(env, idParam);
       }
       return env.ASSETS.fetch(request);
     } catch (e) {

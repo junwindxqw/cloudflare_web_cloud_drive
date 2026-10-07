@@ -384,6 +384,8 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/i/$IMGID")
 chk "缺扩展名的直链 404" 404 "$code"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/i/not-a-uuid.png")
 chk "非法 id 的直链 404" 404 "$code"
+code=$(curl -s --path-as-is -o /dev/null -w '%{http_code}' "$BASE/i/%")
+chk "非法编码的直链 404" 404 "$code"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/i/files/$IMGID.png")
 chk "带路径前缀的直链 404" 404 "$code"
 
