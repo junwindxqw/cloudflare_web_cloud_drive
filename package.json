@@ -6,11 +6,30 @@
   "description": "基于 Cloudflare Workers + R2 + D1 的免费网盘",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "wrangler d1 execute DB --remote --file=schema.sql && wrangler deploy",
     "db:init:local": "wrangler d1 execute DB --local --file=schema.sql",
     "db:init:remote": "wrangler d1 execute jun-drive-db --remote --file=schema.sql",
     "tail": "wrangler tail",
     "test": "node tests/image-probe-test.mjs && bash tests/api-test.sh"
+  },
+  "cloudflare": {
+    "bindings": {
+      "SESSION_SECRET": {
+        "description": "会话签名密钥：任意长随机串（如 openssl rand -hex 32 的输出），必填"
+      },
+      "RESEND_API_KEY": {
+        "description": "Resend API Key：发送登录验证码邮件用，可在 resend.com 免费申请，必填"
+      },
+      "ALLOWED_EMAIL": {
+        "description": "允许登录本站的邮箱（管理员）。单用户网盘，填你自己的邮箱；留空则用仓库默认值"
+      },
+      "MAIL_FROM": {
+        "description": "发件人，需为 Resend 已验证域名下的邮箱，如 JunDrive <noreply@example.com>"
+      },
+      "OPEN_REGISTRATION": {
+        "description": "设为 1 则任何人可注册（默认关闭）。当前为单用户模型，建议保持关闭"
+      }
+    }
   },
   "devDependencies": {
     "wrangler": "^4.129.0"

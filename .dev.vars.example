@@ -1,0 +1,14 @@
+# 复制本文件为 .dev.vars 后填写真实值（.dev.vars 已被 .gitignore 忽略，不会提交）
+# 生产环境请改用 wrangler secret put，不要把真实密钥写进 wrangler.jsonc
+
+# 会话签名密钥：任意长随机串（openssl rand -hex 32）
+SESSION_SECRET=
+
+# Resend API Key：发送登录验证码邮件用（在 resend.com 免费申请）
+RESEND_API_KEY=
+
+# 发件人：需为 Resend 已验证域名下的邮箱，留空则用默认值
+# MAIL_FROM=JunDrive <noreply@example.com>
+
+# 允许注册/登录的邮箱（管理员），留空则用仓库默认值
+# ALLOWED_EMAIL=you@example.com

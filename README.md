@@ -1,123 +1,123 @@
 # JunDrive · Cloudflare 免费网盘
 
-一个部署在 Cloudflare 上的个人网盘，**全部使用 Cloudflare 免费服务**，无需服务器：
+一个部署在 Cloudflare 上的个人网盘，**不花一分钱**：Workers 跑接口、R2 存文件、D1 存元数据，前端直接托管在 Workers 上。坐拥一个可公网访问的私有云盘：传文件、建目录、生成分享链接，附带一个图床。
 
-| 组件 | 服务 | 免费额度（个人使用足够） |
-| --- | --- | --- |
-| 计算与 API | Cloudflare **Workers** | 10 万次请求/天 |
-| 文件存储 | Cloudflare **R2** | 10 GB 存储/月，流量免费 |
-| 元数据（文件树/分享/上传任务） | Cloudflare **D1** (SQLite) | 5 GB 存储，500 万行读/天 |
-| 前端托管 | Workers **静态资源** | 免费、不限请求 |
-| 登录验证码邮件 | **Resend** | 100 封/天，域名 `junwind.site` |
+## 有什么用
 
-## 功能
+- **网盘**：上传文件/整个文件夹、拖拽上传、Ctrl+V 粘贴（截图也行）；文件夹嵌套、重命名、移动、删除；支持断点续传下载；图片/视频/音频/PDF/文本在线预览
+- **搜索与视图**：全局搜索文件名，支持列表/网格两种视图，按名称/大小/时间排序
+- **分享**：文件或整个文件夹生成公开链接，可设提取码（自动附在链接上，访客免输入）和有效期（1/7/30 天/永久）
+- **图床**：上传图片得到公开直链 `/i/<id>.<ext>`，一键复制 URL / Markdown / HTML / BBCode；网盘里的图片可一键转存
+- **账号**：邮箱验证码登录，可设置/修改密码；PC 与手机自适应，自动深色模式
+- **安全底线**：密码 PBKDF2 加盐哈希；HTML/SVG 一律强制下载（防存储型 XSS）；分享访问严格限制在分享目录子树内
 
-- 🔐 完整账号体系：**注册 / 登录 / 找回密码** 三个页面（标签页切换），密码使用 PBKDF2 加盐哈希存储，支持邮箱验证码登录、忘记密码自助重置、站内修改密码（改密后其他设备全部下线）；Resend 发信
-- 👤 唯一管理员：默认仅授权邮箱可注册/登录（首次登录自动注册）；设置 `OPEN_REGISTRATION=1` 后对所有人开放注册（注意：当前网盘为单用户共享模型，开放前请先评估）
-- 📤 上传：单文件 / 整个文件夹（保留目录结构）/ 桌面拖拽 / **Ctrl+V 直接粘贴文件或截图**；R2 分片上传，单文件最大 8 GB，实时进度、停滞自动重试、可取消；上传完成提示 10 秒后自动消失
-- 🖼 **图床**：独立的图片上传/管理视图，上传即得公开直链 `/i/<id>.<ext>`，支持点击/拖拽/Ctrl+V 截图上传、实时进度；一键复制 **URL / Markdown / HTML / BBCode** 四种格式（可记住选择、上传后自动复制）；画廊带尺寸/大小/时间与批量复制、批量删除；网盘里的图片可一键转存到图床
-- 📥 下载：支持断点续传（HTTP Range），视频/音频可拖动进度条
-- 📁 文件夹：新建、重命名、移动、递归删除；同名自动加 `(1)` 后缀
-- 🔗 分享：公开链接，提取码自动生成并直接附带在链接上（`?pwd=xxxx`，访客打开即自动验证，免输入，同百度网盘）；可选有效期（1/7/30 天/永久），支持文件与整个文件夹；分享管理页可复制/撤销
-- 👁 预览：图片、视频、音频、PDF、常见文本/代码（上传的 HTML/SVG 一律强制下载，杜绝存储型 XSS）
-- 📱 UI：PC 与手机自适应（手机端底部 FAB 操作），自动深色模式，中文界面
-- 🔍 全局搜索、列表/网格视图、按名称/大小/时间排序
+免费额度：Workers 10 万次请求/天，R2 10 GB 存储，D1 5 GB，Resend 100 封邮件/天——个人使用足够。
 
-## 一键部署
+## 怎么部署
 
-前提：一个 Cloudflare 账号，并已安装 Node.js ≥ 18。
+### 方式一：一键部署（推荐）
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/junwindxqw/cloudflare_web_cloud_drive)
+
+点击按钮，按 Cloudflare 的引导页面操作即可，全程约 2 分钟：
+
+1. 登录并授权 Cloudflare（需要 GitHub 账号公开仓库）；
+2. 给仓库和 Worker 起个名字；
+3. 创建 D1 数据库和 R2 存储桶（引导页会列出，用默认名即可）；
+4. 填写两个密钥（按钮引导页会逐项给出说明）：
+   - `SESSION_SECRET`：会话签名密钥，任意长随机串（如 `openssl rand -hex 32` 的输出）
+   - `RESEND_API_KEY`：Resend 的 API Key，在 [resend.com](https://resend.com) 免费申请，用于发登录验证码邮件
+5. 把 `ALLOWED_EMAIL` 改成**你自己的邮箱**——这是唯一允许登录本站的账号，不填会无法登录。
+
+部署完成后打开分配的 `*.workers.dev` 域名，用这个邮箱收验证码登录即可。
+
+### 方式二：命令行手动部署
+
+前提：一个 Cloudflare 账号，本地装好 Node.js ≥ 18。
 
 ```bash
 npm install
 npx wrangler login          # 浏览器授权
+```
 
-# 1. 创建免费资源（名称可自行修改，需与 wrangler.jsonc 保持一致）
+**1. 创建存储资源**
+
+```bash
 npx wrangler r2 bucket create jun-drive-files
 npx wrangler d1 create jun-drive-db
-#    → 把输出的 database_id 填入 wrangler.jsonc 的 d1_databases[0].database_id
-
-# 2. 初始化数据库表
-npx wrangler d1 execute jun-drive-db --remote --file=schema.sql
-
-# 3. 设置密钥（均会提示输入，勿提交到代码库）
-npx wrangler secret put SESSION_SECRET      # 会话签名密钥（任意长随机串）
-npx wrangler secret put RESEND_API_KEY      # Resend API 密钥
-
-# 4. 部署（含前端静态资源）
-npx wrangler deploy
+#    → 把输出的 database_id 填到 wrangler.jsonc 的 d1_databases[0].database_id
 ```
 
-### 邮件登录配置（Resend）
+**2. 设置密钥**（都会提示输入，勿提交到代码库）
 
-1. 在 [Resend](https://resend.com) 注册并把域名 `junwind.site`（或其他域名）添加为已验证域名，按提示在 Cloudflare DNS 中加好 SPF/DKIM 记录；
-2. 创建 API Key 并 `npx wrangler secret put RESEND_API_KEY`；
-3. 可选变量（在 `wrangler.jsonc` 的 `vars` 中配置）：
-   - `MAIL_FROM`：发件人，默认 `JunDrive <noreply@junwind.site>`，需为已验证域名下的邮箱；
-   - `ALLOWED_EMAIL`：允许注册/登录的邮箱，默认 `junwind.xqw@gmail.com`（唯一管理员）；
-   - `OPEN_REGISTRATION`：设为 `1` 时对所有人开放邮箱注册/登录（默认关闭；当前网盘为单用户共享模型，开放前请先评估）。
+```bash
+npx wrangler secret put SESSION_SECRET      # 任意长随机串
+npx wrangler secret put RESEND_API_KEY      # Resend 的 API Key
+```
 
-### 绑定自定义域名
+**3. 配置允许登录的邮箱**
 
-`wrangler.jsonc` 中已配置：
+在 `wrangler.jsonc` 的 `vars` 中把 `ALLOWED_EMAIL` 改成你的邮箱（默认仅仓库内置邮箱可登录）；按需再填 `MAIL_FROM`（发件人，须为 Resend 已验证域名下的邮箱）、`OPEN_REGISTRATION`（设为 `1` 则任何人可注册）。
+
+**4. 部署**（自动初始化数据库表结构）
+
+```bash
+npm run deploy
+```
+
+打开分配的 `*.workers.dev` 域名，用第 3 步允许的邮箱收验证码登录即可。
+
+### 邮件说明
+
+登录靠邮箱验证码驱动，所以需要 Resend（免费档 100 封/天）：在 Resend 注册后，把你的域名添加为已验证域名（按提示在 Cloudflare DNS 加好 SPF/DKIM 记录），`MAIL_FROM` 必须使用该域名下的邮箱。
+
+### 绑定自己的域名（可选）
+
+在 `wrangler.jsonc` 里加回 routes（域名需已托管在该 Cloudflare 账号下），`npm run deploy` 会自动创建 DNS 记录与证书：
 
 ```jsonc
-"routes": [{ "pattern": "drive.junwind.site", "custom_domain": true }]
+"routes": [{ "pattern": "drive.example.com", "custom_domain": true }]
 ```
 
-把域名换成你自己的（域名需已托管在该 Cloudflare 账号下），`wrangler deploy` 会自动创建 DNS 记录与证书，无需手动操作。
+> 本仓库维护者自己部署：专属配置（账号/域名/数据库 ID）已收在 `env.personal`，用 `npx wrangler deploy -e personal` 即可。
 
 ## 本地开发
 
 ```bash
-npm run db:init:local        # 初始化本地 D1（首次）
-npm run dev                  # http://127.0.0.1:8787 ，本地变量见 .dev.vars
-npm test                     # 图片格式单测 + API 集成测试（集成测试需 dev 服务运行中）
+npm run db:init:local                                   # 首次：初始化本地 D1
+npm run dev                                             # http://127.0.0.1:8787
+npm test                                                # 图片格式单测 + API 集成测试（需 dev 运行中）
 ```
 
-本地开发默认 `DEV_MAIL_LOG=1`：不真正发邮件，验证码直接在 `/api/auth/send-code` 响应的 `devCode` 字段返回（也会打印到 dev 控制台）。生产环境切勿设置该变量。
+本地默认不发真邮件：验证码直接出现在 `/api/auth/send-code` 响应的 `devCode` 字段里。生产环境切勿设置该变量（见 `.dev.vars.example`）。
 
-### 图床说明
+## 注意事项
 
-- 入口：顶栏「🖼 图床」标签，或直接访问 `#/imagebed`；图床与网盘数据相互独立（图床图片存在 R2 的 `images/` 前缀下）。
-- 上传：点击上传区、拖拽、或任意界面 Ctrl+V 粘贴（截图亦可）；单张 ≤ 10 MB，仅接受 **JPG / PNG / GIF / WebP / AVIF / BMP / ICO**（按文件内容魔数判定，扩展名与声明的 MIME 均不采信）。
-- 直链：`https://<你的域名>/i/<id>.<ext>`，**任何人可直接访问**（供外站以 `<img>` 嵌入），带一年不可变缓存与 `nosniff`；删除图片后直链立即 404。请勿上传敏感图片。
-- 复制格式：URL / Markdown / HTML / BBCode 可切换并记住，上传完成可自动复制；画廊支持多选后批量复制、批量删除。
-- 已有部署升级：`npx wrangler d1 execute jun-drive-db --remote --file=migrations/003-imagebed.sql`（仅新增 images 表，不影响网盘数据）。
+- 图床直链 `/i/<id>.<ext>` **任何人可直接访问**（供外站 `<img>` 嵌入），删除图片后立即失效——请勿上传敏感图片
+- R2 免费额度 10 GB/月，超量计费，建议在 Cloudflare 控制台设预算告警
+- 已有旧部署升级（全新安装无需执行；两个迁移按顺序各执行一次）：
+  ```bash
+  npx wrangler d1 execute jun-drive-db --remote --file=migrations/002-password-auth.sql
+  npx wrangler d1 execute jun-drive-db --remote --file=migrations/003-imagebed.sql
+  ```
 
 ## 目录结构
 
 ```
-├── wrangler.jsonc      # Cloudflare 配置（R2/D1/静态资源/自定义域名）
-├── schema.sql          # D1 表结构
-├── src/
-│   ├── worker.js       # Worker 入口
-│   ├── api.js          # 全部 API 路由
-│   ├── auth.js         # 会话/口令/限流
-│   └── mail.js         # Resend 邮件发送（含出站 URL 校验）
-├── public/             # 前端 SPA（无构建，直接托管）
-│   ├── index.html
-│   ├── app.js          # 网盘主应用（含图床视图）
-│   ├── share.js        # 公开分享页 /s/<token>
-│   ├── common.js       # 公共工具
+├── wrangler.jsonc        # Cloudflare 配置（顶层可移植；env.personal 为维护者专属）
+├── schema.sql            # D1 表结构
+├── .dev.vars.example     # 密钥模板（复制为 .dev.vars 使用，已被 gitignore）
+├── package.json          # 脚本 + 部署引导页的密钥说明（cloudflare.bindings）
+├── migrations/           # 旧库升级迁移（新装直接执行 schema.sql）
+├── src/                  # 后端（Workers）
+│   ├── worker.js         # 入口
+│   ├── api.js            # 全部 API 路由
+│   ├── auth.js           # 会话/口令/限流
+│   └── mail.js           # Resend 发信
+├── public/               # 前端（无构建，直接托管）
+│   ├── app.js            # 网盘主应用（含图床）
+│   ├── share.js          # 公开分享页 /s/<token>
+│   ├── common.js         # 公共工具
 │   └── style.css
-└── tests/
-    ├── api-test.sh         # API 集成测试
-    └── image-probe-test.mjs # 图片格式识别/尺寸解析单测
+└── tests/                # 单测 + API 集成测试
 ```
-
-## 安全设计
-
-- 完整账号体系：注册（邮箱验证码验证归属 + 设置密码）、密码登录、忘记密码（验证码 + 新密码）、站内修改密码；密码以 PBKDF2-SHA256（25k 次迭代 + 随机盐）哈希存储
-- 会话为 HMAC-SHA256 签名的无状态 Cookie（HttpOnly / Secure / SameSite=Lax），密钥由 `SESSION_SECRET`（或回退 `ADMIN_PASSWORD`）派生；会话绑定用户 epoch，重置/修改密码后其他设备全部下线
-- 默认仅白名单邮箱可注册/登录（`ALLOWED_EMAIL`，默认 `junwind.xqw@gmail.com` 唯一管理员）；`OPEN_REGISTRATION=1` 时开放
-- 验证码按用途（登录/注册/重置）隔离，10 分钟有效、至多 5 次尝试；发码 5 次/15 分钟/邮箱、20 次/15 分钟/IP；密码登录错误 10 次/15 分钟/邮箱
-- 登录失败提示统一为“邮箱或密码错误”，不泄露账号是否存在；找回密码对未注册邮箱静默忽略
-- 分享访问范围用递归 CTE 严格限制在分享根的子树内，目录穿越/越权访问返回 403
-- 出站邮件请求固定为 `https://api.resend.com`，发起前校验协议与 host（拒绝 localhost/私有/保留地址）
-- 图床：仅登录可上传/管理（每邮箱 15 分钟 200 次），公开直链 `/i/<id>.<ext>` 不做鉴权但 URL 为随机 UUID；图片类型按**文件头魔数**判定（拒绝 SVG/HTML 等可执行内容，扩展名与客户端声明的 MIME 一概不信），落库 Content-Type 只来自服务端白名单，响应带 `X-Content-Type-Options: nosniff` 与 `Content-Security-Policy: sandbox`
-- 上传的 HTML/SVG 等可执行类型不提供内联预览；所有文件响应带 `X-Content-Type-Options: nosniff` 与 `Content-Security-Policy: sandbox`
-- 文件名规范化（拒绝路径分隔符/控制字符），R2 对象 key 为 UUID，与用户输入完全隔离
-
-## 免责与限额
-
-R2 免费额度为 10 GB 存储/月（Class A 操作 100 万次/月、Class B 1000 万次/月），超量会产生费用，可在 Cloudflare 控制台设置预算告警。

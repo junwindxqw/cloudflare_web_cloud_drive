@@ -1,13 +1,14 @@
 {
   // Cloudflare 网盘：Workers(计算) + R2(存储) + D1(元数据) + 静态资源(前端)
-  // 全部为 Cloudflare 免费服务
+  //
+  // 顶层为「可移植配置」：不含账号、域名、数据库 ID 等专属值，
+  // 任何人（Deploy to Cloudflare 按钮 / wrangler CLI）拿到都能直接部署。
+  //
+  // 维护者本人的专属配置（账号 ID / 自定义域名 / 数据库 ID）在下方 env.personal，
+  // 维护者部署时使用：npx wrangler deploy -e personal
   "name": "jun-drive",
   "main": "src/worker.js",
   "compatibility_date": "2025-11-01",
-  "account_id": "fe25574c2fb79ccf6071391962a40576",
-  "routes": [
-    { "pattern": "drive.junwind.site", "custom_domain": true }
-  ],
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
@@ -20,14 +21,38 @@
       "bucket_name": "jun-drive-files"
     }
   ],
+  // 数据库 ID 由部署时生成：按钮部署会自动创建并回填；
+  // CLI 部署请在 wrangler d1 create 之后把输出的 database_id 填到此处。
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "jun-drive-db",
-      "database_id": "5ef4ef70-deea-4102-b3d9-45095c73a69e"
+      "database_name": "jun-drive-db"
     }
   ],
+  // 部署引导页会展示以下变量（可留空使用代码内默认值）：
+  // ALLOWED_EMAIL 必填——只填允许登录的邮箱，否则无法登录（默认回退为仓库默认值）；
+  // MAIL_FROM / OPEN_REGISTRATION 可选。
+  "vars": {
+    "ALLOWED_EMAIL": "",
+    "MAIL_FROM": "",
+    "OPEN_REGISTRATION": ""
+  },
   "observability": {
     "enabled": true
+  },
+  "env": {
+    "personal": {
+      "account_id": "fe25574c2fb79ccf6071391962a40576",
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "jun-drive-db",
+          "database_id": "5ef4ef70-deea-4102-b3d9-45095c73a69e"
+        }
+      ],
+      "routes": [
+        { "pattern": "drive.junwind.site", "custom_domain": true }
+      ]
+    }
   }
 }
