@@ -1452,6 +1452,16 @@ a {
   text-align: center;
   padding: 16px 0 48px;
 }
+/* 复制失败时的手动复制输入框 */
+.copy-fallback {
+  width: 100%;
+  margin-top: 10px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12.5px;
+  resize: vertical;
+  word-break: break-all;
+  user-select: text;
+}
 
 /* ---------- 移动端适配 ---------- */
 @media (max-width: 768px) {

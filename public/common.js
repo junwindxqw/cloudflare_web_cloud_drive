@@ -243,3 +243,25 @@ export function copyText(text) {
     }
   });
 }
+
+// 复制文本，失败时弹出可手动复制的输入框。
+// clipboard API 需要标签页获得焦点（无焦点/非安全上下文下会抛 NotAllowedError），
+// 此时 execCommand 兜底在多数浏览器同样受限，故最终退回到“展示文本让用户自己复制”。
+export async function copyTextOrPrompt(text, { title = '复制以下内容' } = {}) {
+  try {
+    await copyText(text);
+    return true;
+  } catch {
+    const m = openModal(`
+      <div class="modal-body">
+        <h3>${escapeHtml(title)}</h3>
+        <p class="muted" style="font-size:13px">自动复制失败（浏览器可能因页面未聚焦而禁止写剪贴板），请全选后按 Ctrl+C 手动复制：</p>
+        <textarea class="input copy-fallback" id="copy-fallback-text" rows="4" readonly>${escapeHtml(text)}</textarea>
+      </div>
+      <div class="modal-foot"><button class="btn btn-primary" data-close>完成</button></div>`);
+    const ta = m.querySelector('#copy-fallback-text');
+    ta.focus();
+    ta.select();
+    return false;
+  }
+}

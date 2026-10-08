@@ -913,13 +913,14 @@ async function imagebedList(env, url) {
   )
     .bind(...binds, limit)
     .all();
-  const stats = await env.DB.prepare('SELECT COUNT(*) AS c, COALESCE(SUM(size),0) AS s FROM images').first();
+  // COUNT/SUM 聚合要扫全表：只在首页（无 cursor）计算，翻页时返回 null 让前端沿用已知统计
+  const stats = cursor ? null : await env.DB.prepare('SELECT COUNT(*) AS c, COALESCE(SUM(size),0) AS s FROM images').first();
   const items = results.map((r) => ({ ...r, url: `/i/${r.id}.${r.ext}` }));
   const last = results[results.length - 1];
   return json({
     items,
-    total: stats?.c || 0,
-    totalSize: stats?.s || 0,
+    total: stats ? stats.c || 0 : null,
+    totalSize: stats ? stats?.s || 0 : null,
     nextCursor: results.length === limit && last ? `${last.created_at}:${last.id}` : null,
   });
 }

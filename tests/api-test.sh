@@ -422,6 +422,10 @@ done
 chk "cursor 分页遍历完整" "4" "$(echo "$SEEN" | wc -w)"
 chk "cursor 分页无重复" "4" "$(echo "$SEEN" | tr ' ' '\n' | grep -c .)"
 
+# 翻页时不再做 COUNT/SUM 聚合：total/totalSize 返回 null，供前端沿用首页统计
+P2=$(curl -s -b "$JAR" -H "$IP" "$BASE/api/imagebed/list?limit=1&cursor=$(curl -s -b "$JAR" -H "$IP" "$BASE/api/imagebed/list?limit=1" | jget 'o.nextCursor')")
+chk "翻页统计返回 null" "null,null" "$(echo "$P2" | jget 'String(o.total)+","+String(o.totalSize)')"
+
 # 上传要计入限流（login_failures 中 imgup: 前缀的行数）
 IMGROWS=$(npx wrangler d1 execute DB --local --json --command "SELECT COUNT(*) AS c FROM login_failures WHERE ip LIKE 'imgup:%'" 2>/dev/null | jget 'o[0].results[0].c')
 chk "上传计入限流计数" "yes" "$([ "${IMGROWS:-0}" -ge 4 ] && echo yes || echo no)"

@@ -1,5 +1,5 @@
 // 网盘主应用
-import { api, apiUrl, fmtSize, fmtDate, iconFor, fileKind, escapeHtml, toast, openModal, confirmDialog, promptDialog, debounce, copyText } from './common.js';
+import { api, apiUrl, fmtSize, fmtDate, iconFor, fileKind, escapeHtml, toast, openModal, confirmDialog, promptDialog, debounce, copyTextOrPrompt } from './common.js';
 
 const $ = (sel, el = document) => el.querySelector(sel);
 
@@ -947,12 +947,7 @@ function openShareDialog(it) {
           }
         </div>`;
       const copy = async (text, okMsg) => {
-        try {
-          await copyText(text);
-          toast(okMsg);
-        } catch {
-          toast('复制失败，请手动复制', 'err');
-        }
+        if (await copyTextOrPrompt(text, { title: '复制分享链接' })) toast(okMsg);
       };
       m.querySelector('#share-copy').addEventListener('click', () => copy(urlWithPwd, '链接已复制（含提取码）'));
       m.querySelector('#share-copy-all')?.addEventListener('click', () =>
@@ -1005,12 +1000,8 @@ function openSharesDialog() {
         .join('');
       box.querySelectorAll('[data-copy]').forEach((b) =>
         b.addEventListener('click', async () => {
-          try {
-            await copyText(`${location.origin}/s/${b.dataset.copy}`);
-            toast('链接已复制');
-          } catch {
-            toast('复制失败', 'err');
-          }
+          const ok = await copyTextOrPrompt(`${location.origin}/s/${b.dataset.copy}`, { title: '复制分享链接' });
+          if (ok) toast('链接已复制');
         })
       );
       box.querySelectorAll('[data-del]').forEach((b) =>
@@ -1633,8 +1624,9 @@ async function ibLoad(reset = false) {
       ibState.selection.clear();
     }
     ibState.items.push(...data.items);
-    ibState.total = data.total;
-    ibState.totalSize = data.totalSize;
+    // total/totalSize 仅在首页返回；翻页时为 null，沿用已有统计（期间若有增删，切换页签时会重算）
+    if (data.total !== null && data.total !== undefined) ibState.total = data.total;
+    if (data.totalSize !== null && data.totalSize !== undefined) ibState.totalSize = data.totalSize;
     ibState.nextCursor = data.nextCursor;
   } catch (e) {
     toast(e.message, 'err');
@@ -1727,12 +1719,8 @@ function ibLinkText(it) {
 async function ibCopy(ids) {
   const items = ibState.items.filter((i) => ids.includes(i.id));
   if (!items.length) return;
-  try {
-    await copyText(items.map(ibLinkText).join('\n'));
-    toast(items.length > 1 ? `已复制 ${items.length} 条链接` : '链接已复制');
-  } catch {
-    toast('复制失败，请手动复制', 'err');
-  }
+  const ok = await copyTextOrPrompt(items.map(ibLinkText).join('\n'), { title: items.length > 1 ? `复制 ${items.length} 条链接` : '复制链接' });
+  if (ok) toast(items.length > 1 ? `已复制 ${items.length} 条链接` : '链接已复制');
 }
 
 async function ibDelete(ids) {
@@ -1890,13 +1878,18 @@ function ibRunTask(task) {
 }
 
 function ibOnUploaded(task, item) {
+  // 只更新数据，渲染延后到整批结束：逐张全量重渲染 + 逐张请求 /api/me 在大批量时明显抖动
   ibState.items.unshift(item);
   ibState.total += 1;
   ibState.totalSize += item.size;
   task.batch.links.push(ibLinkText(item));
   renderIbStats();
+}
+
+function ibRenderBatchResult() {
   renderIbList();
   renderIbBatch();
+  renderIbStats();
   refreshMe().then(updateUsageText).catch(() => {});
 }
 
@@ -1904,15 +1897,15 @@ function ibSettle(task) {
   const b = task.batch;
   b.settled++;
   if (b.settled < b.total) return;
+  // 整批结束：统一渲染一次画廊、刷新一次用量
+  ibRenderBatchResult();
   // 一次传几十张时不要把整堆链接塞进剪贴板：自动复制最多取前几条，其余提示手动选择
   const AUTO_COPY_MAX = 5;
   if (ibState.autoCopy && b.links.length) {
     const n = Math.min(b.links.length, AUTO_COPY_MAX);
-    copyText(b.links.slice(0, n).join('\n'))
-      .then(() =>
-        toast(`上传完成，已复制 ${n} 条链接${b.links.length > n ? `（共 ${b.links.length} 张，其余请在画廊中手动复制）` : ''}`, 'ok', 6000)
-      )
-      .catch(() => toast('上传完成，但自动复制失败，请手动复制', 'err'));
+    copyTextOrPrompt(b.links.slice(0, n).join('\n'), { title: '上传完成 · 已复制链接' }).then((ok) => {
+      if (ok) toast(`上传完成，已复制 ${n} 条链接${b.links.length > n ? `（共 ${b.links.length} 张，其余请在画廊中手动复制）` : ''}`, 'ok', 6000);
+    });
   } else if (b.links.length) {
     toast(`上传完成 ${b.links.length} 张`, 'ok', 5000);
   }
@@ -1971,7 +1964,7 @@ async function uploadToImagebed(it) {
   try {
     const { item } = await api('/api/imagebed/from-drive', { method: 'POST', body: { fileId: it.id } });
     const link = `${location.origin}${item.url}`;
-    const copied = await copyText(link).then(() => true).catch(() => false);
+    const copied = await copyTextOrPrompt(link, { title: '图床直链' });
     toast(copied ? `已上传到图床，链接已复制：${link}` : `已上传到图床：${link}`, 'ok', 10000);
   } catch (e) {
     toast(e.message, 'err');
