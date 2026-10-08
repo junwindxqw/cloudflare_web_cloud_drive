@@ -359,6 +359,9 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H "$IP" -X POST -F "not
 chk "缺少文件字段 400" 400 "$code"
 code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H "$IP" -F "file=@$TMP/huge.png" "$BASE/api/imagebed/upload")
 chk "超过 10MB 被拒 413" 413 "$code"
+# 分块编码不带 Content-Length，绕过预检，应由流式硬上限兜底
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H "$IP" -H 'Transfer-Encoding: chunked' -F "file=@$TMP/huge.png" "$BASE/api/imagebed/upload")
+chk "分块编码超限仍被拒 413" 413 "$code"
 
 UP=$(curl -s -b "$JAR" -H "$IP" -F "file=@$TMP/pic.png" "$BASE/api/imagebed/upload")
 IMGID=$(echo "$UP" | jget 'o.item.id')
@@ -378,6 +381,17 @@ chk "公开直链 200（无需登录）" "yes" "$(echo "$H" | head -1 | grep -q 
 chk "Content-Type 为 image/png" "yes" "$(echo "$H" | grep -qi 'content-type: image/png' && echo yes || echo no)"
 chk "长缓存头" "yes" "$(echo "$H" | grep -qi 'cache-control: public, max-age=31536000, immutable' && echo yes || echo no)"
 chk "nosniff 头" "yes" "$(echo "$H" | grep -qi 'x-content-type-options: nosniff' && echo yes || echo no)"
+
+# 条件请求：带 If-None-Match 命中同一 ETag 应回 304
+ETAG_VAL=$(echo "$H" | grep -i '^etag:' | tr -d '\r' | cut -d' ' -f2)
+if [ -n "$ETAG_VAL" ]; then
+  code=$(curl -s -o /dev/null -w '%{http_code}' -H "If-None-Match: $ETAG_VAL" "$BASE$IMGURL")
+  chk "条件请求命中回 304" 304 "$code"
+  code=$(curl -s -o /dev/null -w '%{http_code}' -H 'If-None-Match: "stale-etag"' "$BASE$IMGURL")
+  chk "ETag 不匹配仍回 200" 200 "$code"
+else
+  chk "条件请求命中回 304" "304" "no-etag-header"
+fi
 chk "直链内容与源文件一致" "$(sha256sum "$TMP/pic.png" | cut -d' ' -f1)" "$(sha256sum "$TMP/dl.png" | cut -d' ' -f1)"
 
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/i/$IMGID")
@@ -425,6 +439,19 @@ IBURL=$(echo "$IB" | jget 'o.item.url')
 chk "网盘图片转存图床" "yes" "$(echo "$IBURL" | grep -qE '^/i/[0-9a-f-]{36}\.png$' && echo yes || echo no)"
 curl -s "$BASE$IBURL" -o "$TMP/ib.png"
 chk "转存内容与源一致" "$(sha256sum "$TMP/pic.png" | cut -d' ' -f1)" "$(sha256sum "$TMP/ib.png" | cut -d' ' -f1)"
+
+# 非法 fileId 直接 404，不进数据库查询
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H "$IP" -H 'Content-Type: application/json' -d '{"fileId":"../etc/passwd"}' -X POST "$BASE/api/imagebed/from-drive")
+chk "非法 fileId 转存 404" 404 "$code"
+
+# 网盘里的超大图片转存：应先被 10MB 上限拒绝，而不是先整体读入内存
+PUP2=$(curl -s -b "$JAR" -H "$IP" -H 'Content-Type: application/json' -d "{\"name\":\"huge-pic.png\",\"size\":$(stat -c%s "$TMP/huge.png"),\"mime\":null,\"parentId\":null}" -X POST "$BASE/api/upload/init")
+PUP2ID=$(echo "$PUP2" | jget 'o.uploadId')
+P2ETAG=$(curl -s -b "$JAR" -H "$IP" -X PUT --data-binary "@$TMP/huge.png" "$BASE/api/upload/$PUP2ID/part/1" | jget 'o.etag')
+curl -s -b "$JAR" -H "$IP" -H 'Content-Type: application/json' -d "{\"parts\":[{\"partNumber\":1,\"etag\":\"$P2ETAG\"}]}" -X POST "$BASE/api/upload/$PUP2ID/complete" > /dev/null
+HUGEID=$(curl -s -b "$JAR" -H "$IP" "$BASE/api/search?q=huge-pic" | jget 'o.items[0].id')
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H "$IP" -H 'Content-Type: application/json' -d "{\"fileId\":\"$HUGEID\"}" -X POST "$BASE/api/imagebed/from-drive")
+chk "超大图片转存被拒 413" 413 "$code"
 
 code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H "$IP" -X DELETE "$BASE/api/imagebed/$IMGID")
 chk "删除图片 200" 200 "$code"

@@ -14,7 +14,7 @@ export default {
         try {
           idParam = decodeURIComponent(idParam);
         } catch {}
-        return await handleImagebedRaw(env, idParam);
+        return await handleImagebedRaw(request, env, idParam);
       }
       return env.ASSETS.fetch(request);
     } catch (e) {

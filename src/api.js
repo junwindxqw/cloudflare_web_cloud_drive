@@ -690,6 +690,10 @@ async function handlePub(request, env, ctx, url, seg, method) {
 
 const IMAGEBED_MAX_SIZE = 10 * 1024 * 1024; // 单张图片 10 MB
 
+// UUID 字符形态（files 表主键与图床 R2 key 共用），入口处先校验再进入后续流程
+const UUID_CORE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const FILE_ID_RE = new RegExp(`^${UUID_CORE}$`, 'i');
+
 // 允许的图片格式：归一化扩展名 -> Content-Type。
 // 展示用的 Content-Type 只由本表决定，客户端声明的 MIME 一律不采信（配合 X-Content-Type-Options: nosniff）。
 const IMAGE_TYPES = {
@@ -818,12 +822,44 @@ async function storeImage(env, bytes, displayName) {
   return { id, name, ext, size: bytes.byteLength, width, height, url: `/i/${id}.${ext}` };
 }
 
+// 带硬上限地读入请求体：累计超过 limit 立即中止，避免把超大请求整体缓冲进 Worker 内存
+async function readCapped(body, limit) {
+  const reader = body.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      try {
+        await reader.cancel();
+      } catch {}
+      throw new HttpError(413, `单张图片不能超过 ${IMAGEBED_MAX_SIZE / 1024 / 1024} MB`);
+    }
+    chunks.push(value);
+  }
+  if (!total) throw new HttpError(400, '图片内容为空');
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.byteLength;
+  }
+  return out.buffer;
+}
+
 async function imagebedUpload(request, env, ctx, session) {
   const email = session?.email || 'unknown';
   if (!(await auth.checkRateLimit(env, `imgup:${email}`, 15 * 60 * 1000, 200))) {
     throw new HttpError(429, '上传过于频繁，请 15 分钟后再试');
   }
   ctx.waitUntil(auth.recordFailure(env, `imgup:${email}`));
+  // Content-Length 预检：正常客户端都会带上，超限请求在解析前直接拒绝，省去整包缓冲
+  const declared = Number(request.headers.get('Content-Length'));
+  if (Number.isFinite(declared) && declared > IMAGEBED_MAX_SIZE) {
+    throw new HttpError(413, `单张图片不能超过 ${IMAGEBED_MAX_SIZE / 1024 / 1024} MB`);
+  }
   let form;
   try {
     form = await request.formData();
@@ -832,19 +868,30 @@ async function imagebedUpload(request, env, ctx, session) {
   }
   const file = form.get('file');
   if (!file || typeof file.arrayBuffer !== 'function') throw new HttpError(400, '缺少图片文件');
-  const bytes = await file.arrayBuffer();
+  // 分块编码可绕过 Content-Length 预检，这里用流式硬上限兜底，避免把超限内容整体读进内存
+  const bytes = await readCapped(file.stream(), IMAGEBED_MAX_SIZE + 1);
   const item = await storeImage(env, bytes, typeof file.name === 'string' ? file.name : '');
   return json({ item });
 }
 
-// 把网盘中已有的图片文件复制一份到图床（R2 读出后重新写入，互不影响）
+// 把网盘中已有的图片文件复制一份到图床（R2 读出后重新写入，互不影响）。
+// r2_key 来自 files 表（上传时由服务端生成，形如 files/<uuid>），不随用户输入构造。
 async function imagebedFromDrive(request, env) {
   const body = await readJson(request);
-  const row = await env.DB.prepare("SELECT id, name, r2_key FROM files WHERE id = ? AND type = 'file'").bind(String(body.fileId || '')).first();
+  const fileId = String(body.fileId || '');
+  if (!FILE_ID_RE.test(fileId)) throw new HttpError(404, '文件不存在');
+  const row = await env.DB.prepare("SELECT id, name, r2_key FROM files WHERE id = ? AND type = 'file'").bind(fileId).first();
   if (!row || !row.r2_key) throw new HttpError(404, '文件不存在');
+  // 网盘文件可达 8GB：先用 head 拿到大小，超限直接拒绝，避免整体读入内存后才被拦下
+  const meta = await env.BUCKET.head(row.r2_key);
+  if (!meta) throw new HttpError(404, '文件内容不存在');
+  if (meta.size > IMAGEBED_MAX_SIZE) {
+    throw new HttpError(413, `单张图片不能超过 ${IMAGEBED_MAX_SIZE / 1024 / 1024} MB`);
+  }
   const obj = await env.BUCKET.get(row.r2_key);
   if (!obj) throw new HttpError(404, '文件内容不存在');
-  const item = await storeImage(env, await obj.arrayBuffer(), row.name);
+  const bytes = await obj.arrayBuffer();
+  const item = await storeImage(env, bytes, row.name);
   return json({ item });
 }
 
@@ -878,6 +925,8 @@ async function imagebedList(env, url) {
 }
 
 async function imagebedDelete(env, id) {
+  // 先删 D1 行、后删 R2 对象：D1 是唯一事实来源，删行失败时直链仍有效比留下无主的列表项更好；
+  // 若 R2 删除失败仅残留不可见对象（多占存储），下次删除同 id 时会重试。
   const row = await env.DB.prepare('SELECT id, ext FROM images WHERE id = ?').bind(id).first();
   if (!row) throw new HttpError(404, '图片不存在');
   await env.DB.prepare('DELETE FROM images WHERE id = ?').bind(id).run();
@@ -886,9 +935,9 @@ async function imagebedDelete(env, id) {
 }
 
 // 公开直链 /i/<id>.<ext>（无需登录，任何人可访问，供外站以 <img> 嵌入）
-const IMAGE_KEY_RE = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.([a-z0-9]{1,8})$/i;
+const IMAGE_KEY_RE = new RegExp(`^(${UUID_CORE})\\.([a-z0-9]{1,8})$`, 'i');
 
-export async function handleImagebedRaw(env, idParam) {
+export async function handleImagebedRaw(request, env, idParam) {
   const m = (idParam || '').match(IMAGE_KEY_RE);
   if (!m) throw new HttpError(404, '图片不存在');
   const ext = m[2].toLowerCase();
@@ -897,12 +946,19 @@ export async function handleImagebedRaw(env, idParam) {
   // URL 不可变（id 不变），可长期强缓存；删除后自然 404
   const headers = {
     'Content-Type': IMAGE_TYPES[ext] || 'application/octet-stream',
-    'Content-Length': String(obj.size),
-    'ETag': obj.httpEtag,
     'Cache-Control': 'public, max-age=31536000, immutable',
     'X-Content-Type-Options': 'nosniff',
     'Content-Security-Policy': 'sandbox',
   };
+  const etag = obj.httpEtag;
+  if (etag) {
+    headers['ETag'] = etag;
+    // 支持条件请求：内容不变时回 304（immutable 下浏览器很少再问，主要是给会复验的客户端）
+    if (request.headers.get('If-None-Match') === etag) {
+      return new Response(null, { status: 304, headers });
+    }
+  }
+  headers['Content-Length'] = String(obj.size);
   return new Response(obj.body, { status: 200, headers });
 }
 

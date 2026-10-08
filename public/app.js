@@ -1624,8 +1624,10 @@ async function ibLoad(reset = false) {
   ibState.loading = true;
   renderIbMore();
   try {
-    const cursor = reset ? '' : ibState.nextCursor ? `?cursor=${encodeURIComponent(ibState.nextCursor)}` : '';
-    const data = await api(`/api/imagebed/list${cursor}`);
+    const params = new URLSearchParams();
+    params.set('limit', String(IB_PAGE));
+    if (!reset && ibState.nextCursor) params.set('cursor', ibState.nextCursor);
+    const data = await api(`/api/imagebed/list?${params.toString()}`);
     if (reset) {
       ibState.items = [];
       ibState.selection.clear();
@@ -1795,11 +1797,19 @@ function ibBatch(action) {
 }
 
 // 上传：一批文件作为一个批次，全部结束后按“上传后自动复制”统一复制链接
+const IB_IMAGE_EXT_RE = /\.(jpe?g|png|gif|webp|avif|bmp|ico)$/i;
+
 function ibHandleFiles(fileList) {
   const files = [...fileList];
   if (!files.length) return;
   const batch = { total: 0, settled: 0, links: [], tasks: [] };
+  let skipped = 0;
   for (const f of files) {
+    // 客户端预筛：服务端仍会按魔数判定，这里只为少发无效请求、少弹错误提示
+    if (f.type && !f.type.startsWith('image/') && !IB_IMAGE_EXT_RE.test(f.name)) {
+      skipped++;
+      continue;
+    }
     if (f.size > IB_MAX_SIZE) {
       toast(`「${f.name}」超过 ${IB_MAX_SIZE / 1024 / 1024}MB 上限，已跳过`, 'err', 8000);
       continue;
@@ -1809,6 +1819,7 @@ function ibHandleFiles(fileList) {
     batch.tasks.push(task);
     batch.total++;
   }
+  if (skipped) toast(`已跳过 ${skipped} 个非图片文件`, 'err');
   if (!batch.total) return;
   toast(`开始上传 ${batch.total} 张图片`);
   renderIbTasks();
@@ -1893,9 +1904,14 @@ function ibSettle(task) {
   const b = task.batch;
   b.settled++;
   if (b.settled < b.total) return;
+  // 一次传几十张时不要把整堆链接塞进剪贴板：自动复制最多取前几条，其余提示手动选择
+  const AUTO_COPY_MAX = 5;
   if (ibState.autoCopy && b.links.length) {
-    copyText(b.links.join('\n'))
-      .then(() => toast(`上传完成，已复制 ${b.links.length} 条链接`, 'ok', 5000))
+    const n = Math.min(b.links.length, AUTO_COPY_MAX);
+    copyText(b.links.slice(0, n).join('\n'))
+      .then(() =>
+        toast(`上传完成，已复制 ${n} 条链接${b.links.length > n ? `（共 ${b.links.length} 张，其余请在画廊中手动复制）` : ''}`, 'ok', 6000)
+      )
       .catch(() => toast('上传完成，但自动复制失败，请手动复制', 'err'));
   } else if (b.links.length) {
     toast(`上传完成 ${b.links.length} 张`, 'ok', 5000);
